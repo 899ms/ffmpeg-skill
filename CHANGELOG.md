@@ -4,6 +4,12 @@
 
 ## Unreleased
 
+(nothing yet)
+
+## 1.10.1
+
+_Automated release: version and notes generated from pull requests merged since 1.10.0._
+
 ### Fixed
 
 - `render.py` now refuses an unrecognised key in a project — top level or in any stage/clip object — naming the object, the key and the nearest valid key, instead of silently ignoring it (a clip `start`/`end` typo rendered the clip untrimmed; a stage typo dropped the stage, both reported as success).
@@ -14,6 +20,8 @@
 - docs/contract.md: `tools/list` under `FFMPEG_SKILL_MCP_LEAN` is stable in tool and argument names and `required` lists — what the frozen snapshot pins — not byte-identical (descriptions may change).
 - SKILL.md: the time-grammar sentence is scoped to the timestamp flags (`--start`/`--end`/`--at`/`--from`/`--duration`/`--offset` and cue/chapter files); `doctor`'s tool list is `doctor --json`'s `tools`.
 - references/scripts.md notes the `--crf` deprecation and `FFMPEG_SKILL_NO_OVERWRITE`; README marks `proxy.py --crf` as the deprecated alias.
+- fix: render.py refuses unknown project keys, ctx= reaches write_plan and the exit hook, --crf mark on every tool with --quality, time refusals say not a time (#211)
+- docs: eval iteration 10 at 1.10.0, README catches up with 1.8-1.10, PR checklist names the README (#210)
 
 ## 1.10.0
 

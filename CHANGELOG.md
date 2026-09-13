@@ -8,6 +8,14 @@
 
 ## 1.15.0
 
+_Automated release: version and notes generated from pull requests merged since 1.14.0._
+
+- feat: text people can see (emoji, complex-script shaping in graphics.py, ' and % kept, caption wrap without orphans, label rule) (#226)
+- docs: demo gallery covers every tool (51 demos, inspection section, every-script test) (#227)
+- docs: eval iteration 15 at 1.14.0 (delivery templates: 12/13 one encode, 13/13 platform pass) (#225)
+
+## 1.15.0
+
 ### Added
 
 - **Emoji in captions and titles.** `caption.py`, `graphics.py` and `overlay.py` gain `--emoji auto|color|png|mono|none`, `--emoji-assets DIR`, `--emoji-scale FLOAT` and `--emoji-max N`. The colour route is a **PNG overlay**, not a font: drawtext cannot load a CBDT/sbix emoji face at all (it fails filter initialisation — `Could not set font size to 48 pixels: invalid library handle`, and at the font's own strike `Monocromatic (1bpp) fonts are not supported.` — and writes no file), and an installed colour emoji family proves nothing either (Noto Color Emoji installs cleanly on builds whose libass still draws a monochrome outline). `--emoji-assets DIR` is a directory of PNGs named by code point in the Twemoji/Noto convention (`1f389.png`, `1f1ef-1f1f5.png`, `1f469-200d-1f4bb.png`), also read from `brand.json` (`styles.caption.emoji_assets`) and `FFMPEG_SKILL_EMOJI_ASSETS`. **Nothing is ever downloaded**: a missing directory is `kind: input` naming the two sets people already have, never a fetch. In a caption the text keeps its place in the generated ASS with an invisible placeholder reserving exactly the emoji's box (measured: U+2588 FULL BLOCK is 0.66–0.83 em depending on the face, so the gap is reserved with alpha-hidden `\fsp` spacing instead, which is exact in every face this repo resolves — including inside a `\kf` karaoke run, where the placeholder is its own zero-duration segment), and each PNG is composited after the `ass=` filter. `caption.py`/`graphics.py --json` gain an `emoji` block (`mode`, `count`, `clusters`, `assets`, `missing`, `overlays`); `--json-brief` carries `mode` and `count`. Emoji also count as a full em in the wrap, so an emoji-heavy line no longer overflows the safe area, and a wrap never breaks inside a ZWJ sequence, a flag pair or a skin-tone modifier.

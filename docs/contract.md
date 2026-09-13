@@ -21,7 +21,7 @@ The contract is derived from the code that runs, not maintained beside it:
 | Field | Meaning | Changes when |
 |---|---|---|
 | `contract_version` | shape of this document (`1.0`) | a key is renamed, removed or changes meaning |
-| `skill.version` | the npm / package.json version (`1.10.1`) | any release |
+| `skill.version` | the npm / package.json version (`1.11.0`) | any release |
 
 A release that adds a tool or a flag keeps `contract_version`; a breaking change to the
 ToolSpec shape bumps it. Consumers pin on `contract_version` and read `skill.version`
@@ -88,19 +88,19 @@ spelling keeps working until 2.0.
 
 | What 2.0 removes | Since | Replacement | To be ready today |
 |---|---|---|---|
-| The per-tool v1 success keys next to `result_v2` (`output`, `probe`, `commands`, `verified`, `verification` and each tool's own keys at the top level) | 1.10.1 | `result_v2`, promoted to the top level in 2.0 | Run with `FFMPEG_SKILL_RESULT_V2=1` and read `result_v2` (`metrics`, `notes`, `details`) instead of the top-level keys |
-| `--crf` as an alias of `--quality` on every re-encoding tool that takes `--quality` (`export.py` keeps `--crf`: its preset chooses the encoder) | 1.10.1 | `--quality N` (the same CRF scale, codec-neutral) | Pass `--quality`; `--crf` warns on stderr and is marked in `--help` |
-| `json` and `progress` in the MCP `inputSchema` | 1.10.1 | nothing: the transport sets them itself | Stop sending them from an MCP client; run the server with `FFMPEG_SKILL_MCP_LEAN=1` to see the 2.0 schema |
-| `hdr` meaning "BT.2020 primaries *or* a PQ/HLG transfer" in `probe` | 1.10.1 | `hdr_signal` (true only for PQ / HLG / Dolby Vision); in 2.0 `hdr` takes that meaning | Key on `hdr_signal` for "is this a real HDR signal" and on `hdr_format` for the `BT.2020 SDR` case |
-| Overwriting an existing output with only a warning | 1.10.1 | `--overwrite` as explicit consent (refused without it from 2.0) | Set `FFMPEG_SKILL_NO_OVERWRITE=1` (the recommended agent setting) and pass `--overwrite` where a replacement is intended |
+| The per-tool v1 success keys next to `result_v2` (`output`, `probe`, `commands`, `verified`, `verification` and each tool's own keys at the top level) | 1.11.0 | `result_v2`, promoted to the top level in 2.0 | Run with `FFMPEG_SKILL_RESULT_V2=1` and read `result_v2` (`metrics`, `notes`, `details`) instead of the top-level keys |
+| `--crf` as an alias of `--quality` on every re-encoding tool that takes `--quality` (`export.py` keeps `--crf`: its preset chooses the encoder) | 1.11.0 | `--quality N` (the same CRF scale, codec-neutral) | Pass `--quality`; `--crf` warns on stderr and is marked in `--help` |
+| `json` and `progress` in the MCP `inputSchema` | 1.11.0 | nothing: the transport sets them itself | Stop sending them from an MCP client; run the server with `FFMPEG_SKILL_MCP_LEAN=1` to see the 2.0 schema |
+| `hdr` meaning "BT.2020 primaries *or* a PQ/HLG transfer" in `probe` | 1.11.0 | `hdr_signal` (true only for PQ / HLG / Dolby Vision); in 2.0 `hdr` takes that meaning | Key on `hdr_signal` for "is this a real HDR signal" and on `hdr_format` for the `BT.2020 SDR` case |
+| Overwriting an existing output with only a warning | 1.11.0 | `--overwrite` as explicit consent (refused without it from 2.0) | Set `FFMPEG_SKILL_NO_OVERWRITE=1` (the recommended agent setting) and pass `--overwrite` where a replacement is intended |
 
 ## Skill
 
 ```json
 {
   "contract_version": "1.0",
-  "deprecated": [{"what": "...", "since": "1.10.1", "replacement": "...", "removed_in": "2.0.0", "where": "cli | json | mcp | behaviour"}],
-  "skill": {"id": "ffmpeg-skill", "version": "1.10.1", "execution_mode": "local", "kind": "execution",
+  "deprecated": [{"what": "...", "since": "1.11.0", "replacement": "...", "removed_in": "2.0.0", "where": "cli | json | mcp | behaviour"}],
+  "skill": {"id": "ffmpeg-skill", "version": "1.11.0", "execution_mode": "local", "kind": "execution",
             "entrypoints": {"cli": "...", "mcp": "...", "contract": "...", "doctor": "..."},
             "not_provided": ["AI reasoning", "decisions", "production plans", "project IR", "approvals", "network access", "transcription engine"]},
   "requirements": {"python": ">=3.9 (standard library only)", "ffmpeg": ">=5.0", "ffprobe": ">=5.0"},

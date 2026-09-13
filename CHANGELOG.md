@@ -4,6 +4,12 @@
 
 ## Unreleased
 
+(nothing yet)
+
+## 1.11.0
+
+_Automated release: version and notes generated from pull requests merged since 1.10.1._
+
 ### Changed
 
 - **SKILL.md is two-tier** (token diet, 1.10.2): 362 lines / 37.8 KB → 198 lines / 29.1 KB with no rule removed. The long "Things that look right but are wrong" and "Gotchas" prose, and the audio-only recipe table, moved to the new `references/gotchas.md`; SKILL.md keeps one line per item with a `references/gotchas.md#anchor` pointer.
@@ -14,6 +20,7 @@
 
 - `--json-brief` on every tool: the same success document as `--json`, trimmed to `status`, `output`, `dry_run`, `verified`, a compact `summary` (`duration_s`, `width`, `height`, `fps`, `vcodec`, `acodec`, `channels`, and `lufs` when the tool measured one), the tool's own keys and the count of commands instead of the command lines — 2372 → 784 bytes for a `cut.py` run. It implies `--json`; `--json`'s own output is unchanged; failures print the same failure document as today.
 - `contract --json`: `supports_json_brief` per tool, mirroring the measured `supports_json`. The MCP `tools/list` schema gains the `json_brief` argument on every tool (an addition; the frozen 1.x snapshot was regenerated).
+- feat: token diet — two-tier SKILL.md, --json-brief on every tool, call-saving workflow guidance, short doctor summary (#212)
 
 ## 1.10.1
 

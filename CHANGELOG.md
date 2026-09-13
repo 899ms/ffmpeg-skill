@@ -4,6 +4,12 @@
 
 ## Unreleased
 
+(nothing yet)
+
+## 1.14.0
+
+_Automated release: version and notes generated from pull requests merged since 1.13.0._
+
 ### Added
 
 - **One delivery table** (`scripts/_platforms.py`, internal — the public tool count is unchanged at 42). Every destination is described once: frame, fps, the compliance spec `check.py` reports (duration, aspects, minimum height, fps, codecs, size, LUFS, true peak, SDR-only), the fraction of the frame the app's own UI covers, caption defaults, the export preset and the check platform. `check.py`'s `SPECS` and `export.py`'s `PRESETS`/`PLATFORM_OF` are now built from it — each platform preset's frame and duration cap included — so the loudness `export.py --normalize` hits, the frame it writes, the cap it trims at and the spec `check.py` enforces are the same numbers by construction (two presets deliberately differ and say so in the code: `youtube4k` is YouTube at 2160p, and no `youtube*` preset trims at YouTube's 12-hour limit). The alias map (`youtube-shorts`/`yt-shorts` → `shorts`, `yt` → `youtube`, `instagram`/`ig` → `reels`, `twitter` → `x`, `fb` → `facebook`) is accepted by `check.py --platform`, `export.py --preset`, `caption.py`/`graphics.py`/`overlay.py --platform`, `look.py --safe` and `render.py --template` alike, and those tools now offer one platform vocabulary rather than three. Existing platform rows and preset command lines are byte-for-byte what they were.
@@ -18,6 +24,9 @@
 ### Docs
 - SKILL.md gains the delivery-template rows and the safe-zone gotcha, `references/scripts.md` a templates section with the safe-zone table, `docs/contract.md` the delivery-table shape, what is derived from it and the new arguments, `references/gotchas.md` a "Platform safe zones" section (the target of SKILL.md's safe-zone pointer), and the README a "Deliver to a platform" example. `demos/build.py` and `docs/demos.md` gain two demos: `fit_blur` and `template_tiktok`. `docs/roadmap.md` marks 1.14.0 done and renumbers the remaining themes.
 - `tests/fixtures/mcp_tools.json` regenerated: `render` gains `template`, `list_templates`, `cues`, `srt`, `logo`, `title`, `brand`, `chapters`, `fit`, `output` and `write_project`; `caption`, `graphics` and `overlay` gain `platform` (and `graphics` also `margin`, `text`, `top`, `bottom`, `duration`); `look` gains `safe`; `report` gains `pack`. Nothing was removed, renamed or made required.
+- feat: delivery templates (render.py --template, safe zones, platform presets, blurred fit, social pack, sticker/hook/meme) (#224)
+- docs: eval iteration 14 at 1.13.0 (76 prompts, 17 languages, delivery baseline) + roadmap states + external review filed (#223)
+- docs: before/after demo gallery (23 demos, demos/build.py, docs/demos.md) (#222)
 
 ## 1.13.0
 

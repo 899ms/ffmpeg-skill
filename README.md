@@ -45,11 +45,11 @@ Left half is the input, right half is what the command produced. **[All 23 befor
 
 If `ffmpeg` and `python3` are on your PATH, it works: offline, on footage you would rather not upload.
 
-> **SPEC** (Self-Producing Execution Contract), coined by this project's author
-> [kajisho5](https://github.com/kajisho5): each tool's `input_schema` — the part of its contract
-> and MCP tool definition that has to track the CLI flag-for-flag — is never hand-authored beside
-> the code. It's derived, at run time, from the same `argparse` parser that already defines the
-> CLI, and CI fails the build if any of it drifts. → [full explanation](#what-is-spec)
+> **SPEC** (Self-Producing Execution Contract): each tool's `input_schema` — the part of its
+> contract and MCP tool definition that has to track the CLI flag-for-flag — is never
+> hand-authored beside the code. It is derived, at run time, from the same `argparse` parser that
+> already defines the CLI, and CI fails the build if any of it drifts.
+> → [full explanation](#what-is-spec)
 
 ---
 
@@ -76,7 +76,7 @@ Other repos in the ecosystem — [`media-analysis-skill`](https://github.com/kaj
 
 ## Why
 
-An agent that "knows FFmpeg" still guesses: it assumes a frame rate, picks a codec the container cannot hold, re-encodes a file that only needed a stream copy, and reports "done" without opening the result. ffmpeg-skill exists to take the guessing out:
+An agent that "knows FFmpeg" still guesses: it assumes a frame rate, picks a codec the container cannot hold, re-encodes a file that only needed a stream copy, and reports "done" without opening the result. This skill takes the guessing out:
 
 - **Real files first.** Every job starts with `probe.py`; the agent decides from the measured duration, fps, resolution, colour and audio layout, not from the file name.
 - **Structured tools, not shell strings.** Each operation is a script with typed arguments. Nothing runs through a shell; no filter graph is accepted from the caller.
@@ -150,7 +150,7 @@ Names, order and `inputSchema` in `tools/list` are translated from each tool's a
 
 ## Design principles
 
-These are the rules the skill file gives the agent and the code enforces. Together they are what separates this from a list of FFmpeg one-liners.
+These are the rules the skill file gives the agent and the code enforces.
 
 1. **Probe first.** No tool decides from the file name. `probe.py` measures duration, fps (with variable-frame-rate detection), resolution, rotation, bit depth, HDR format including Dolby Vision, colour tags and every audio stream before anything is cut.
 2. **Lossless when possible.** `cut.py`, `join.py` and `loudness.py` stream-copy what they do not need to touch. Re-encoding happens only when it must: frame-accurate cuts, filters, format changes, or a keyframe farther than the tolerance.
@@ -256,11 +256,11 @@ Picture tools (`fit`, `caption`, `overlay`, `graphics`, `color`, `export`, `scen
 
 ### What is SPEC?
 
-This project's author, [kajisho5](https://github.com/kajisho5), coined **SPEC** (Self-Producing
-Execution Contract) for the pattern this skill's tool layer is built on: each tool's `input_schema`
-— the part of its contract that has to track the CLI exactly, flag for flag — is never
-hand-authored side by side with the code. It is derived, at run time, from the one thing that
-actually has to be correct for the CLI to work at all: the script's own `argparse` parser.
+**SPEC** (Self-Producing Execution Contract) is the name this project's author,
+[kajisho5](https://github.com/kajisho5), gave the pattern the tool layer is built on: each tool's
+`input_schema` — the part of its contract that has to track the CLI exactly, flag for flag — is
+never hand-authored side by side with the code. It is derived, at run time, from the one thing
+that has to be correct for the CLI to work at all: the script's own `argparse` parser.
 
 Concretely, `scripts/_contract.py`'s `_capture_parser()` imports every tool script and
 intercepts its `parse_args()` call to get the live, fully-built parser object — flags, types,
@@ -279,11 +279,9 @@ aren't things a parser can express; only `input_schema` is parser-derived.)
   shape. `tests/test_contract.py` runs on every CI run and fails the build if any of them drift
   out of sync with what the code actually does — it catches drift, it doesn't fix it for you.
 
-The result: add a flag to a script's `argparse` block, and `input_schema` and the MCP tool
-definition follow with no second edit; if a docs page or a `TOOL_META` entry falls behind, CI
-catches it rather than letting it drift silently. There is no separate `input_schema` file to
-forget to update, and no version of "what CLI flags does this tool accept" that can quietly go
-stale.
+So adding a flag to a script's `argparse` block updates `input_schema` and the MCP tool
+definition with no second edit, and a docs page or `TOOL_META` entry that falls behind fails CI
+rather than drifting silently. There is no separate `input_schema` file to forget to update.
 
 ### Machine-readable contract
 
@@ -366,6 +364,15 @@ FFmpeg 8 shortened the flag column of `ffmpeg -filters`. A parser anchored on th
 
 ## Tested on real footage
 
+**What is tested where.** The contract and the test suite (`tests/test_contract.py`,
+`tests/test_all.py`) run on Linux, macOS and Windows on every pull request, minus the handful of
+POSIX-shim tests listed under [Development](#development). The real-device media corpus
+(`tests/corpus.py`) has been run on Linux and macOS; the full corpus has **not** been run on
+Windows yet, and neither has an install by someone other than the maintainer been reproduced
+there — [issue #143](https://github.com/kajisho5/ffmpeg-skill/issues/143) tracks both. Treat the
+numbers below as measured on Linux (and, where stated, macOS), not as a claim about every file
+type on every OS.
+
 | Result | Measurement |
 |---|---|
 | **92 / 92** | verification steps on a 10-file real-device corpus (GoPro, DJI, iPhone incl. Dolby Vision, Android screen recordings, HDR10, 24p, Tears of Steel), 0.8.0, local ffmpeg 6.1 |
@@ -374,6 +381,7 @@ FFmpeg 8 shortened the flag column of `ffmpeg -filters`. A parser anchored on th
 | **F1 0.97** | `scenes.py`, 53 hard cuts between single takes, precision 0.95, recall 1.00 at the default threshold |
 | **exact to the sample** | `cut.py --accurate` on WAV, FLAC (44.1 kHz) and AAC → WAV; WAV stream copy within 2 ms; AAC output +21 ms of encoder priming, reported as `codec_frame` (0.9.1) |
 | **72 / 72** | agent runs of 24 prompts (12 English edits, 8 Japanese, 4 that must be declined), three repeats, graded by an independent model: routing, honest refusals and user's language 72/72, report format 71/72, visual check whenever the picture changed 24/24 (0.8.4) |
+| **76 / 76** | 1.13.0 run (2026-09-13, one pass per prompt, Sonnet agent, regex grader + focused Opus grader) on the set grown to 76 prompts: 18 in Thai, Hindi, Hebrew, Russian, Greek, Vietnamese, Indonesian, Turkish and Italian, and 8 delivery requests (TikTok, Reels, Shorts, LinkedIn, Douyin, podcast): routing 76/76, honest refusals and failures 76/76 with 0 false successes and 0 raw ffmpeg calls, report format 76/76, user's language 76/76 across seventeen languages, visual check 18/18, trigger set 38/38, Opus quality mean 4.65 over the 26 new runs. One real defect found: Hindi through `graphics.py` (drawtext) comes out wrong-shaped even though the font covers Devanagari; captions through libass are fine (queued for 1.15.0). Four delivery runs spent a second encode for loudness, which 1.14.0's templates address. Tokens per run flat at 72.3k. Details in `evals/results/iteration-14.json` |
 | **50 / 50** | 1.12.0 run (2026-09-13, one pass per prompt, Sonnet agent, regex grader + focused Opus grader) on the set grown to 50 prompts with two each in Chinese, Korean, Spanish, Portuguese, French, German and Arabic: routing 50/50, honest refusals and failures 50/50 with 0 false successes and 0 raw ffmpeg calls, report format 50/50, user's language 50/50 across nine languages, visual check 13/13, trigger set 29/29, Opus quality mean 4.83. Every non-Latin caption and lower-third picked a covering font by itself and rendered real glyphs (Arabic shaped and right-to-left); tokens per run unchanged at 72.3k. Details in `evals/results/iteration-13.json` |
 | **36 / 36** | 1.11.1 re-run (2026-09-13, one pass per prompt, Sonnet agent, regex grader + focused Opus grader): routing 36/36, honest refusals and failures 36/36 with 0 false successes and 0 raw ffmpeg calls, report format 36/36, user's language 36/36, visual check 8/8, trigger set 22/22, Opus quality mean 4.75. The 1.11.1 wording did what it said (`doctor` before a job 23 of 36 runs → 0, `--json-brief` 4 → 23) and tokens per run stayed flat at 71.8k, because about 64k of every run is the host's own context; the token-diet theme closes here. Details in `evals/results/iteration-12.json` |
 | **36 / 36** | 1.11.0 re-run (2026-09-13, one pass per prompt, Sonnet agent, regex grader + focused Opus grader): routing 36/36, honest refusals and failures 36/36 with 0 false successes and 0 raw ffmpeg calls, report format 36/36, user's language 36/36, visual check 8/8, trigger set 22/22. First iteration to measure tokens per run: mean 72.2k against 68.7k at 1.10.0, mostly a fixed per-run floor the skill does not control (a refusal run that only reads SKILL.md costs about 64k), plus `doctor` on 23 of 36 runs; 1.11.1 rewords step 0 and iteration 12 re-measures. Details in `evals/results/iteration-11.json` |
@@ -467,7 +475,7 @@ Contributing a change: see [CONTRIBUTING.md](CONTRIBUTING.md).
 | | |
 |---|---|
 | [CONTRIBUTING.md](CONTRIBUTING.md) | scope, dev setup, tests, PR expectations |
-| [docs/roadmap.md](docs/roadmap.md) | 1.8.0 to 1.21.0 one theme per minor (1.8 to 1.10 pre-ship 2.0, 1.11 the token diet), and what 2.0.0 then removes |
+| [docs/roadmap.md](docs/roadmap.md) | 1.8.0 to 1.21.0 one theme per minor, each marked shipped + evaluated, shipped with eval pending, or planned; and what 2.0.0 then removes |
 | [docs/design-decisions.md](docs/design-decisions.md) | behaviours that look like bugs but are decisions, with rationale and the pinning test; read before filing a bug |
 | [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) | Contributor Covenant 2.1; reports go through the SECURITY.md channel |
 | [SECURITY.md](SECURITY.md) | how to report a vulnerability privately |

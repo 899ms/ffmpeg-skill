@@ -354,6 +354,21 @@ runs a shell, evaluates strings, or executes anything other than the named scrip
 
 ## JSON output
 
+Per-tool keys added in 1.13: `audio` (`audio.py`) reports the mix it built — the
+`--voice` level, `stereo_widen`, whether an `--effects` bed was mixed, and with
+`--music` the `music_volume` plus a `duck` object naming the threshold (dB and
+linear), ratio, attack and release actually used, or `null` when `--duck` was not
+given. `loudness.py` reports `measured` (the input's loudnorm measurement,
+including `input_lra`) and `targets` (the requested lufs / tp / lra).
+`check.py --platform podcast` adds two informational rows to `checks`,
+`channels` and `chapters`.
+
+The MCP `audio` tool publishes `voice` as `{"type": "string", "enum": ["light",
+"medium", "strong"]}`. A client that still sends the 1.12 boolean `{"voice":
+true}` keeps working: `true` emits the bare `--voice`, which is `medium` — the
+chain the flag has always produced. Send the string when you can; the boolean
+is accepted at runtime and means `medium`.
+
 Success (`exit 0`): one document matching `output_schema`, always with
 `status: "completed"`, `output`, `dry_run`, `commands`, and `probe` of the output when a
 file was written. `probe` prints its measurement document directly.

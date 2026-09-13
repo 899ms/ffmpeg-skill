@@ -11,6 +11,7 @@ Examples:
   python3 loudness.py input.mp4                       # -14 LUFS, -1 dBTP
   python3 loudness.py podcast.wav -I -16 --tp -1.5 -o podcast_norm.wav
   python3 loudness.py input.mp4 --measure-only
+  python3 loudness.py music.wav --lra 7                 # tighter loudness range target
 """
 import argparse
 import json
@@ -155,6 +156,8 @@ def main() -> int:
             kind="verification", output=output, result=result,
             hint="raise --audio-bitrate (e.g. 256k) or deliver a lossless format (wav/flac) and let the platform encode")
     emit(output, result=result, dropped_non_av_streams=dropped_streams,
+         measured={k: stats[k] for k in ("input_i", "input_tp", "input_lra", "input_thresh", "target_offset", "silent")},
+         targets={"lufs": args.lufs, "tp": args.tp, "lra": args.lra},
          verification=[{"step": "loudness",
                         "ok": bool(after.get("silent")) or (abs(float(after["input_i"]) - args.lufs) <= 1.0 and float(after["input_tp"]) <= args.tp + 0.1),
                         "lufs": float(after["input_i"]), "tp": float(after["input_tp"]), "target_lufs": args.lufs, "target_tp": args.tp}])

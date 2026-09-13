@@ -4,6 +4,12 @@
 
 ## Unreleased
 
+(nothing yet)
+
+## 1.13.0
+
+_Automated release: version and notes generated from pull requests merged since 1.12.0._
+
 ### Added
 
 - **`audio.py --voice` takes a strength**: `--voice light|medium|strong`, with a bare `--voice` meaning `medium` — byte for byte the chain it has always produced, so existing calls and MCP requests are unchanged. `light` is `highpass=f=80,acompressor=threshold=-18dB:ratio=2:attack=5:release=80:makeup=1` (rumble and level only, for a good room); `medium` is `highpass=f=80,deesser=i=0.4,afftdn=nf=-25:tn=1,acompressor=threshold=-18dB:ratio=3:attack=5:release=80:makeup=2`; `strong` is `medium` followed by `deesser=i=0.6,acompressor=threshold=-24dB:ratio=4:attack=5:release=120:makeup=3,alimiter=limit=0.891251:level=disabled`, for phone and laptop audio.
@@ -19,6 +25,9 @@
 ### Docs
 - **Not shipped: a `loudness.py --dialogue` speech gate.** `loudnorm`'s EBU R128 integrated measurement already applies the −70 LUFS absolute and −10 LU relative gates, so gating the measurement on speech spans moved the result by at most 0.6 LU on every fixture (including one that is half digital silence) — inside `check.py`'s own ±1 LU tolerance — for the cost of a second decode pass. `references/gotchas.md#loudness-and-ambience` records it.
 - `docs/roadmap.md` marks 1.13.0 done and records the decision **not** to add `audio.py --chapters`: `metadata.py episode.mp4 --chapters chapters.txt` already writes chapter markers with every stream copied, and a second spelling inside a tool that re-encodes the audio would be the worse one. `render.py`'s `chapters` key is the project-level answer instead.
+- feat: the audio bed — voice levels, stereo widen, duck parameters, effects stem, loudness --dialogue, podcast rows, project chapters (#221)
+- evals: 18 prompts in th hi he ru el vi id tr it, 8 delivery prompts, 9 trigger queries, grader rules (#220)
+- docs: eval iteration 13 at 1.12.0 (50 prompts, nine languages) (#219)
 
 ## 1.12.0
 

@@ -6,6 +6,12 @@
 
 (nothing yet)
 
+## 1.9.1
+
+_Automated release: version and notes generated from pull requests merged since 1.9.0._
+
+- fix: @fps in caption cue files, one @ only, time_arg() in metadata/multicam/speedramp, render normalize default documented (#207)
+
 ## 1.9.0
 
 _Automated release: version and notes generated from pull requests merged since 1.8.1._

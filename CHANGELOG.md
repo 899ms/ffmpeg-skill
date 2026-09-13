@@ -4,6 +4,12 @@
 
 ## Unreleased
 
+(nothing yet)
+
+## 1.15.1
+
+_Automated release: version and notes generated from pull requests merged since 1.15.0._
+
 ### Changed
 
 - **refactor: `scripts/_common.py` is a package, and `tests/test_all.py` splits by tool group.
@@ -33,6 +39,8 @@
   directory is not a tool, and every `scripts/*.py` enumeration (the contract, the MCP server,
   `demos/build.py`, the every-script tests) skips it unchanged; the source *scans* that must not
   stop covering the helpers (`shell=True` and friends) now read `scripts/_common/*.py` too.
+- refactor: split _common.py into a package and tests by tool group (no behaviour change) (#230)
+- docs: eval 16 at 1.15.0 (82 prompts, focused Opus grader, trigger 40/40) (#229)
 
 ## 1.15.0
 

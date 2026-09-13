@@ -4,8 +4,17 @@
 
 ## Unreleased
 
+(nothing yet)
+
+## 1.11.1
+
+_Automated release: version and notes generated from pull requests merged since 1.11.0._
+
 ### Changed
 - SKILL.md tells the agent that the file is enough to do a job and that `references/scripts.md` / `references/gotchas.md` cost as much to read as SKILL.md itself, so they are opened only for a question the file leaves open; step 0 no longer suggests `doctor` before the first job of a session, only after a failure or when the user asks. Eval iteration 11 measured why: at 1.11.0 agents read `gotchas.md` in 31 of 36 runs (0 of 106 at 1.10.0), `scripts.md` in 36 of 36 (73 of 106) and ran `doctor` in 31 of 36 (41 of 106), so the mean run cost 72.2k tokens against 68.7k at 1.10.0 despite the smaller SKILL.md.
+- fix: SKILL.md stops sending agents to the reference files and doctor on every job (#215)
+- docs: eval iteration 11 at 1.11.0 (36 prompts, tokens per run measured) (#214)
+- docs: the token diet shipped as 1.11.0 (feat PR → minor); roadmap themes move up one, 1.10.2 mentions renamed (#213)
 
 ## 1.11.0
 

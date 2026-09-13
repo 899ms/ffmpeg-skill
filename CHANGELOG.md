@@ -4,6 +4,12 @@
 
 ## Unreleased
 
+(nothing yet)
+
+## 1.12.0
+
+_Automated release: version and notes generated from pull requests merged since 1.11.1._
+
 ### Added
 
 - **Fonts by script.** `caption.py`, `graphics.py` and `overlay.py --text` detect the writing system of the text they are about to draw (Japanese, Chinese, Korean, Arabic, Hebrew, Devanagari, Thai, Cyrillic, Greek) and resolve a font file that actually covers it — `fc-list :lang=xx` on Linux/macOS, the known system fonts on Windows — printing one line: `font: /usr/share/fonts/.../wqy-zenhei.ttc (covers ko)`. A machine where fontconfig reports no font for the script **fails the job** (`kind: input`, with per-OS install hints) instead of writing a video full of empty boxes that ffmpeg reports as a success; a machine with no working fontconfig at all is `unknown`, not `missing`, and the job runs with the font as given behind one info line. An explicit `--font`, an explicit `--font-file`, or a font your brand file itself names is always kept (a brand file that never mentions a font is not a choice — the script still picks one); when fontconfig says the stated font does not cover the text, one info line says so. `caption.py --fonts-dir` is searched first and checked with `fc-scan`: a directory that does not cover the script gets one line and a font resolved by script anyway.
@@ -22,6 +28,9 @@
 
 ### Docs
 - Correction to the 1.11.1 entry: iteration 11's agents did not read `references/gotchas.md` or `references/scripts.md` (0 of 36 and 2 of 36 actual reads; the earlier counts matched the file names inside SKILL.md's own text). What 1.11.1 changed in practice, measured in iteration 12: `doctor` before a job 23 of 36 runs → 0, `--json-brief` on a writing step 4 of 36 → 23. Tokens per run are flat (72.2k → 71.8k) because about 64k of every run is the harness's own context, not the skill.
+- feat: fonts by script (ja zh ko ar he hi th ru el), doctor per-language fonts, captions that wrap and fit (#218)
+- evals: 14 multilingual prompts (zh ko es pt fr de ar), 7 trigger queries, per-language grader rules (#217)
+- docs: eval iteration 12 at 1.11.1 (36 prompts); correct iteration 11's transcript counts (#216)
 
 ## 1.11.1
 

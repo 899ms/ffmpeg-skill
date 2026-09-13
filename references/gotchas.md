@@ -83,17 +83,59 @@ come out soft (a 1280x720 source fit to 9:16 is 406x720 until export scales it t
 1080x1920) — fit to the delivery size first
 (`fit.py --width 1080 --height 1920`), then caption, then export.
 
-CJK and other non-Latin text: libass and drawtext need a font that has the
-glyphs. Check with `fc-list | grep -i cjk`. Then either name it
-(`caption.py --font "Noto Sans CJK JP"`) or point at the file
-(`overlay.py --font-file /usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc`,
-`caption.py --fonts-dir ./fonts --font "Noto Sans CJK JP"`). Without a matching
-font you get boxes, not an error. Install: `apt install fonts-noto-cjk`,
-`brew install --cask font-noto-sans-cjk`.
+Cue length and timing are handled for you since 1.12: `caption.py` wraps every
+cue to the safe area by measured width at the chosen `--size`, splits a cue past
+`--max-lines` (default 2) into consecutive cues, holds a cue shorter than
+`--min-duration` (default 1.0 s) — never past the next cue — and shifts
+everything by `--offset SECONDS`. It reports what it changed on one `cues:` line
+and writes the adjusted copy next to the output, never over the file you passed
+in. Wrapping needs the input video (the line width comes from its real frame
+size); with `--write-srt` alone only the timing flags apply.
 
 Windows drawtext crashes on some real builds (#100): the drawtext tools resolve a
 concrete `--font-file` by default, which avoids it; if one still crashes, pass
 `--font-file` explicitly. Details: `references/ci-platform-pitfalls.md`.
+
+### Fonts by script
+libass and drawtext draw an empty box per character they have no glyph for, and
+ffmpeg still exits 0 — a video full of tofu is the classic "it worked" failure.
+Since 1.12 `caption.py`, `graphics.py` and `overlay.py --text` detect the script
+of the text they are about to draw (Japanese, Chinese, Korean, Arabic, Hebrew,
+Devanagari, Thai, Cyrillic, Greek) and resolve a font file that covers it,
+printing one line — `font: /usr/share/fonts/.../wqy-zenhei.ttc (covers ko)`.
+**No font for the script is a failed job** (`kind: input`), not a warning.
+
+- What this machine can render: `python3 scripts/_contract.py doctor --json`,
+  field `fonts.scripts` (`available` / `missing` / `unknown` per language, with
+  the file it would use). The plain-text `doctor` says the same in one line.
+- What fontconfig has: `fc-list ":lang=ja" file family` (`ja`, `zh-cn`, `ko`,
+  `ar`, `he`, `hi`, `th`, `ru`, `el`).
+- Install: `apt install fonts-noto-cjk fonts-noto-core`, or
+  `brew install --cask font-noto-sans-cjk font-noto-sans-arabic`, or point at a
+  file with `--font-file` (`overlay.py`, `graphics.py`) / `--fonts-dir`
+  (`caption.py`).
+- Han characters alone (no kana, no hangul) are read as Chinese. Japanese or
+  Korean hanja text with no kana needs `--lang ja` / `--lang ko`
+  (`caption.py --language` is the same flag), or `"lang"` in brand.json.
+- An explicit `--font`, an explicit `--font-file`, or a font your brand file
+  itself names is always kept, even when fontconfig says it does not cover the script: you get one info
+  line saying so, not a silent substitution. A brand file that never names a
+  font is not a choice — the script still picks one.
+- `--fonts-dir` (`caption.py`) adds faces to the search, it does not switch the
+  check off: if nothing in the directory covers the script, one line says so and
+  a covering font is resolved as usual.
+- **No fontconfig is `unknown`, not `missing`.** With no `fc-list` on PATH (or
+  one that fails) coverage cannot be verified: the job runs with the font as
+  given behind one info line, because libass and drawtext have font backends of
+  their own. Only fontconfig answering "nothing covers this" fails the job.
+- **RTL:** libass shapes and reorders Arabic and Hebrew correctly, so
+  `caption.py` — which renders every subtitle through libass, `subtitles=` and
+  `ass=` alike — is right for them by construction. `drawtext` (`overlay.py
+  --text`, `graphics.py`) depends on the build: `ffmpeg -version` showing
+  `--enable-libfribidi` (and `--enable-libharfbuzz`) shapes and reorders RTL
+  correctly too; a build without them draws logical order with unjoined
+  letterforms. Nothing in the tools checks this, so on an unknown machine a
+  caption is the safe place for Arabic/Hebrew.
 
 ### Reframing, fps and duration
 `--fit crop` to reach 9:16 from 16:9 throws away 70 % of the width: a wide shot

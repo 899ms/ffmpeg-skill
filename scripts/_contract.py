@@ -768,11 +768,11 @@ def doctor() -> Dict[str, Any]:
         "ok": not missing_required and not unknown_required,
         "tools": _tool_usability(state),
         "gpu_encoders": _gpu_encoders(listings["encoders"]),
-        "fonts": _fonts_capability(),
+        "fonts": _fonts_capability(probe=True),
     }
 
 
-def _fonts_capability() -> Dict[str, Any]:
+def _fonts_capability(probe: bool = True) -> Dict[str, Any]:
     """The default drawtext family (issue #66) plus, since 1.12, one entry per script the tools
     can detect: which languages this machine can actually RENDER, not just which filters exist.
 
@@ -781,7 +781,7 @@ def _fonts_capability() -> Dict[str, Any]:
     here follows). Informational like the default font and gpu_encoders: a machine with no Thai
     font is not a broken install, it is a machine that must not be asked to burn Thai captions.
     """
-    from _common import SCRIPTS, font_for_script, script_font_status
+    from _common import SCRIPTS, font_for_script, script_font_status, emoji_support
 
     font = _default_font()
     result = _font_available(font)
@@ -794,7 +794,12 @@ def _fonts_capability() -> Dict[str, Any]:
         # distinction the tools refuse or continue on.
         status = script_font_status(script)
         scripts[script] = {"status": status, "file": font_for_script(script) if status == "available" else None}
-    return {"default_font": font, "status": result["status"], "detail": result["detail"], "scripts": scripts}
+    # 1.15: emoji are a separate question from the writing system, and the only honest answer is a
+    # render (an installed colour emoji font proves nothing -- libass on this build may still draw
+    # it monochrome). `probe=False` -- `contract --json --static`, and every static/JSON-only path -- skips
+    # that render, exactly as it skips the rest of the environment detection.
+    return {"default_font": font, "status": result["status"], "detail": result["detail"],
+            "scripts": scripts, "emoji": emoji_support(probe=probe)}
 
 
 def _fonts_summary_line(fonts: Dict[str, Any]) -> str:
@@ -819,6 +824,16 @@ def _fonts_summary_line(fonts: Dict[str, Any]) -> str:
         parts.append("no font for " + " ".join(by_state["missing"]))
     if by_state["unknown"]:
         parts.append("unknown (no fontconfig) " + " ".join(by_state["unknown"]))
+    emoji = fonts.get("emoji") or {}
+    mode = emoji.get("mode")
+    if mode == "color":
+        parts.append("emoji colour")
+    elif mode == "png":
+        parts.append("emoji colour (assets)")
+    elif mode == "mono":
+        parts.append("emoji monochrome -- --emoji-assets DIR for colour")
+    elif mode:
+        parts.append("emoji none")
     return "; ".join(parts)
 
 

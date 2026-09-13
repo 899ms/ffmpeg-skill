@@ -109,7 +109,7 @@ libass and drawtext draw an empty box per character they have no glyph for, and
 ffmpeg still exits 0 — a video full of tofu is the classic "it worked" failure.
 Since 1.12 `caption.py`, `graphics.py` and `overlay.py --text` detect the script
 of the text they are about to draw (Japanese, Chinese, Korean, Arabic, Hebrew,
-Devanagari, Thai, Cyrillic, Greek) and resolve a font file that covers it,
+Devanagari, Bengali, Tamil, Thai, Lao, Cyrillic, Greek) and resolve a font file that covers it,
 printing one line — `font: /usr/share/fonts/.../wqy-zenhei.ttc (covers ko)`.
 **No font for the script is a failed job** (`kind: input`), not a warning.
 
@@ -144,6 +144,75 @@ printing one line — `font: /usr/share/fonts/.../wqy-zenhei.ttc (covers ko)`.
   correctly too; a build without them draws logical order with unjoined
   letterforms. Nothing in the tools checks this, so on an unknown machine a
   caption is the safe place for Arabic/Hebrew.
+
+**Shaping is a second problem, and it is not the same one.** A font that covers
+the script still has to be *shaped*: Devanagari matras are reordered, Thai and
+Lao marks re-cluster. drawtext does bidi and Arabic joining correctly on a build
+compiled with fribidi (so Arabic and Hebrew are already right today), but it
+never reorders or re-clusters, because it does not use harfbuzz on any build.
+libass does. Since 1.15 `graphics.py` therefore renders a shaping script
+(`hi bn ta te kn ml gu pa si th lo km my`) through libass automatically — one
+generated `<output>_gfx.ass` next to the file, `text_renderer: "ass"` in the
+JSON — and `--text-render auto|ass|drawtext` overrides it; `--text-render
+drawtext` with such a script is a refusal, not a wrong frame. Latin, CJK and
+Arabic output is unchanged. `overlay.py --text` has no ASS route yet and refuses
+a shaping script, naming `caption.py`/`graphics.py`.
+
+### Emoji
+Colour emoji need **either** a libass that can draw colour glyphs **or** a
+directory of PNGs — and on most builds only the second one exists.
+
+- **An installed colour emoji font proves nothing.** Noto Color Emoji installs
+  cleanly on Ubuntu and libass on the distro ffmpeg still renders a monochrome
+  outline (`Glyph 0x1F389 not found, broken font? Trying all charmaps`). The
+  only honest test is a render, which is what `doctor` runs:
+  `doctor --json` → `.fonts.emoji` (`mode`: `color` / `png` / `mono` / `none`,
+  plus `libass_color` from that render). `contract --json --static` is the way
+  to get the contract without running it; `doctor` itself always probes.
+- **drawtext cannot load an emoji font at all.** Not a degraded render: a
+  CBDT/sbix face fails filter initialisation outright (`Could not set font size
+  to 48 pixels: invalid library handle`, and at the font's own strike
+  `Monocromatic (1bpp) fonts are not supported.`) and no file is written. That
+  is why the colour route is a PNG overlay, never a drawtext font.
+- **PNGs**: `--emoji-assets DIR`, a directory of files named by code point in
+  the Twemoji/Noto convention — lowercase hex joined by `-`: `1f389.png`,
+  `1f1ef-1f1f5.png`, `1f469-200d-1f4bb.png`. Twemoji's `assets/72x72`
+  (CC-BY 4.0) and Noto Emoji's `png/128` (OFL/Apache-2.0) are the two people
+  already have. **The skill never downloads anything**: a missing directory is
+  `kind: input`, never a silent fetch. The same directory can come from
+  `brand.json` (`styles.caption.emoji_assets`) or `FFMPEG_SKILL_EMOJI_ASSETS`.
+- **Mixed lines are the normal case.** The text stays in the ASS with an
+  invisible placeholder reserving exactly the emoji's box, and the PNG is
+  composited on top after the `ass=` filter — libass keeps the shaping and the
+  karaoke, including inside a `\kf` run (the placeholder is its own
+  zero-duration segment).
+- **What counts as an emoji.** A cluster only starts at an emoji *base*.
+  U+200D ZWJ and U+200C ZWNJ are ordinary Indic/Persian orthography (`क्‍ष` is
+  ka + virama + ZWJ + ssa) and are glue only *between* two emoji; a VS16 or a
+  skin-tone modifier after a plain letter is not an emoji either. U+FE0E
+  (VS15) asks for the character, so `❤︎` is text and `❤️` is an emoji.
+- **Placement tolerance.** The position comes from the same averaged em table
+  the wrap uses, so an emoji at the start or end of a line is exact and one in
+  the middle of a Latin line drifts by the accumulated rounding of the
+  characters before it — **measured at 17 px, 0.28 em, about 3 % of the line
+  width** on a 24 px caption over a 1280-wide frame, always landing inside the
+  reserved gap rather than on a glyph. It never leaves the safe area. An RTL
+  line (Arabic, Hebrew) is laid out right-to-left, so the position is measured
+  from the rendered end of the line, not the logical prefix.
+- **Degraded paths are honest, not silent.** `mode: mono` means libass draws
+  whatever glyph the text font has (it has a fallback chain), exits 0, and says
+  so in a `warning:` line and in `notes` — so a `graphics.py` run that would
+  otherwise use drawtext, which loads one font file and has **no** fallback
+  chain, is routed to libass rather than reporting a monochrome glyph it would
+  actually draw as an empty box; a run pinned to `--text-render drawtext`
+  degrades to `none` and says so. `mode: none` strips the cluster from the drawn
+  text (a missing decoration must not fail a delivery) but refuses a
+  `graphics.py` template whose text is *only* emoji — that frame would be blank.
+  `--emoji-max` (default 60) caps the overlay count; `--emoji-max 0` means none.
+- **`--animate` moves the PNG too.** The overlay gets a matching alpha fade, so
+  the emoji arrives and leaves with the line instead of popping in.
+- `overlay.py --text` has no PNG route: `--emoji png|color` there names
+  `caption.py`/`graphics.py` instead.
 
 ### Reframing, fps and duration
 `--fit crop` to reach 9:16 from 16:9 throws away 70 % of the width: a wide shot

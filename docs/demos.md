@@ -84,6 +84,27 @@ python3 scripts/caption.py demos/out/fixtures/motion.mp4 --text demos/out/fixtur
 
 **Look for:** Each cue scales in, and the highlight colour walks word by word across the line.
 
+### Emoji captions in colour
+
+![Emoji captions in colour](demos/captions_emoji.gif)
+
+```bash
+python3 scripts/caption.py demos/out/fixtures/motion.mp4 --text demos/out/fixtures/cues_emoji.txt --size 30 --bold --margin 40 --emoji mono -o demos/out/captions_emoji_before.mp4
+python3 scripts/caption.py demos/out/fixtures/motion.mp4 --text demos/out/fixtures/cues_emoji.txt --size 30 --bold --margin 40 --emoji-assets demos/out/fixtures/emoji -o demos/out/captions_emoji_after.mp4
+```
+
+**Look for:** Left: emoji as this ffmpeg's libass draws them (monochrome, or missing). Right: one PNG per emoji cluster composited over the caption, with the ASS reserving the exact gap -- the text does not move.
+
+### Hindi lower third, shaped
+
+![Hindi lower third, shaped](demos/lower_third_hindi.gif)
+
+```bash
+python3 scripts/graphics.py demos/out/fixtures/motion.mp4 --template lower-third --name 'प्रिया शर्मा' --title निर्देशक --start 0.5 --end 5 --text-render ass -o demos/out/lower_third_hindi_after.mp4
+```
+
+**Look for:** Left: the same text through drawtext -- the i-matra is not reordered and the final matra is dropped. Right: graphics.py routing Devanagari through libass automatically. drawtext does not use harfbuzz on any build.
+
 ### Lower third
 
 ![Lower third](demos/lower_third.gif)
@@ -539,7 +560,7 @@ python3 scripts/look.py demos/out/fixtures/mandel.mp4 --tiles 4x3 --width 960 -o
 
 ```bash
 python3 scripts/scenes.py demos/out/fixtures/shots.mp4 --highlights 2 --min-scene 1 --edl demos/out/scenes_highlights_picks.txt
-python3 scripts/cut.py demos/out/fixtures/shots.mp4 --segments 0.00-2.00,2.00-4.00 --accurate --preset veryfast -o demos/out/scenes_highlights_after.mp4
+python3 scripts/cut.py demos/out/fixtures/shots.mp4 --segments 0.00-1.50,4.00-5.50 --accurate --preset veryfast -o demos/out/scenes_highlights_after.mp4
 ```
 
 **Look for:** scdet finds the hard cuts, scenes.py ranks the scenes and writes the ranges as an EDL, and cut.py --segments is what turns that proposal into a reel. The ranking is a proxy for interest, not a judgement of it.

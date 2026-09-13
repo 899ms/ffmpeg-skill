@@ -4,6 +4,12 @@
 
 ## Unreleased
 
+(nothing yet)
+
+## 1.10.0
+
+_Automated release: version and notes generated from pull requests merged since 1.9.1._
+
 ### Deprecated
 
 Announced per docs/contract.md's three-step policy (also in `contract --json`'s new top-level
@@ -25,6 +31,8 @@ unchanged in 1.x and is removed in 2.0.0:
 
 - `run()`, `emit()`, `die()` and `info()` accept an optional `ctx=` Context (issue #189 B); `STATE`
   stays the default instance, so no tool changes behaviour. 2.0 makes the argument required.
+- feat: deprecated list in the contract, ctx= on run/emit/die/info, FFMPEG_SKILL_MCP_LEAN, NO_OVERWRITE as the agent setting, eval-9 follow-ups (#209)
+- docs: eval iteration 9 at 1.9.0 (108 runs, independent grader, trigger set) (#208)
 
 ## 1.9.1
 

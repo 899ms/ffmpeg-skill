@@ -1756,6 +1756,43 @@ class PictureTests(MediaFixtures):
         pinned = Path(__file__).resolve().parent / "fixtures" / "caption_1_16_1_fitsize_off.ass"
         self.assertEqual(ass.read_bytes(), pinned.read_bytes())
 
+    def test_caption_says_when_the_text_is_unchanged(self):
+        """1.17.1: the report sentence "the text is yours, unchanged" should not be a judgement
+        the agent has to make -- the run states it (eval 18 cs2/cs3, where one run rewrote the
+        user's cue text)."""
+        vert, cues = self._vertical(), self._fit_cues()
+        proc = script("caption.py", vert, "--text", cues, "--platform", "tiktok", "--max-lines", "2",
+                      "--font", "DejaVu Sans", "-o", OUT / "cap_unchanged.mp4", "--json")
+        data = json.loads(proc.stdout)["caption"]
+        self.assertEqual(data["split"], 0)
+        self.assertTrue(data["text_unchanged"])
+        self.assertIn("caption text unchanged", proc.stderr)
+
+    def test_caption_text_is_not_unchanged_when_a_cue_was_split(self):
+        """Review 17 finding 5: a cue the layout chopped into two consecutive cues is not the
+        text that was handed in -- and it is the exact defect 1.17.1 exists to fix, so the tool
+        must not claim honesty on precisely the runs that are still wrong."""
+        vert, cues = self._vertical(), self._fit_cues()
+        proc = script("caption.py", vert, "--text", cues, "--platform", "tiktok", "--max-lines", "2",
+                      "--size", "24", "--fit-size", "off", "--font", "DejaVu Sans",
+                      "-o", OUT / "cap_split.mp4", "--json")
+        cap = json.loads(proc.stdout)["caption"]
+        self.assertGreater(cap["split"], 0, "this run is the one that splits a cue")
+        self.assertFalse(cap["text_unchanged"])
+        self.assertNotIn("caption text unchanged", proc.stderr)
+
+    def test_caption_text_is_not_unchanged_when_emoji_none_strips_glyphs(self):
+        """--emoji none str.replace()s the clusters out of the drawn text: the viewer reads
+        something other than the cue that was handed in (review 17 finding 5)."""
+        cues = OUT / "cues_emoji_strip.txt"
+        cues.write_text("0:00-0:03 Ship it \U0001F680\n", encoding="utf-8")
+        proc = script("caption.py", self._vertical(), "--text", cues, "--platform", "tiktok",
+                      "--emoji", "none", "--font", "DejaVu Sans",
+                      "-o", OUT / "cap_emoji_none.mp4", "--json")
+        cap = json.loads(proc.stdout)["caption"]
+        self.assertFalse(cap["text_unchanged"])
+        self.assertNotIn("caption text unchanged", proc.stderr)
+
     def test_caption_fit_size_auto_leaves_an_explicit_size_alone(self):
         vert, cues = self._vertical(), self._fit_cues()
         data = json.loads(script("caption.py", vert, "--text", cues, "--platform", "tiktok",

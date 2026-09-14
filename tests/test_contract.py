@@ -2808,6 +2808,176 @@ class DoctorDetectionTests(unittest.TestCase):
                         f"SKILL.md is {size} bytes, {size - 30_000} over the 30,000-byte budget -- "
                         "trim a line rather than raising the limit (see CONTRIBUTING.md)")
 
+    # ------------------------------------------------- #234: child output is decoded as UTF-8
+    def test_every_child_text_capture_names_utf8(self):
+        """#234: `text=True` decodes with the machine's locale code page. On a Windows cp932 box
+        ffprobe's UTF-8 JSON then raises UnicodeDecodeError inside the reader thread,
+        communicate() hands back an empty stdout, and probe.py reported `?s | no video | no
+        audio` with exit 0. Every child capture in this repo states its encoding."""
+        import ast
+
+        def offending_calls(source, rel):
+            """Every subprocess.run/Popen call that asks for text mode without naming UTF-8.
+            The scan is over the parsed call, not over one line: review 17 finding 3 -- the
+            line-matching version could not see `text=text` in runner.run_analysis(), which is
+            exactly the capture that shipped undecorated."""
+            found = []
+            tree = ast.parse(source)
+            funcs = [n for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.Call):
+                    continue
+                name = getattr(node.func, "attr", None) or getattr(node.func, "id", None)
+                if name not in ("run", "Popen", "check_output", "call"):
+                    continue
+                kw = {k.arg: k.value for k in node.keywords if k.arg}
+                if "text" not in kw and "universal_newlines" not in kw:
+                    continue
+                flag = kw.get("text", kw.get("universal_newlines"))
+                if isinstance(flag, ast.Constant) and flag.value is False:
+                    continue                                  # bytes: encoding would be rejected
+                if "encoding" in kw:
+                    continue
+                if any(k.arg is None for k in node.keywords):
+                    # a **mapping of encoding kwargs, built in the enclosing function
+                    owner = [f for f in funcs if f.lineno <= node.lineno <= (f.end_lineno or node.lineno)]
+                    seg = "\n".join(ast.get_source_segment(source, f) or "" for f in owner)
+                    if '"encoding": "utf-8"' in seg or "'encoding': 'utf-8'" in seg:
+                        continue
+                found.append(f"{rel}:{node.lineno}")
+            return found
+
+        offenders = []
+        for root in ("scripts", "evals"):
+            for path in sorted((ROOT / root).rglob("*.py")):
+                offenders += offending_calls(path.read_text(encoding="utf-8"), path.relative_to(ROOT))
+        self.assertEqual(offenders, [], "decode child output as UTF-8 (errors='replace'), never as the locale code page")
+        # the scan must see the shapes the old line match missed
+        self.assertEqual(offending_calls("subprocess.run(cmd, text=text)", "x.py"), ["x.py:1"])
+        self.assertEqual(offending_calls("subprocess.run(cmd, universal_newlines=True)", "x.py"), ["x.py:1"])
+        self.assertEqual(offending_calls("subprocess.run(cmd, text=False)", "x.py"), [])
+
+    def _utf8_ffprobe_shim(self, body):
+        shim = OUT / "utf8_shim"
+        shim.mkdir(parents=True, exist_ok=True)
+        (shim / "ffprobe").write_text("#!/bin/sh\n" + body, encoding="utf-8")
+        (shim / "ffprobe").chmod(0o755)
+        # LANG/LC_ALL=C with the UTF-8 modes off is this machine's stand-in for a cp932 Windows
+        # console: Python's preferred encoding becomes ASCII, so a locale-decoded capture of the
+        # UTF-8 JSON below fails exactly as it does there.
+        env = dict(os.environ, PATH=f"{shim}:{os.environ['PATH']}", LANG="C", LC_ALL="C",
+                   PYTHONUTF8="0", PYTHONCOERCECLOCALE="0")
+        env.pop("PYTHONIOENCODING", None)
+        return env
+
+    @unittest.skipIf(platform.system() == "Windows", "the fake ffprobe is a #!/bin/sh script")
+    def test_probe_reads_non_ascii_ffprobe_json_under_a_non_utf8_locale(self):
+        doc = ('{"format": {"filename": "\u65e5\u672c\u8a9e.mp4", "format_name": "mov,mp4", '
+               '"duration": "12.0", "size": "1000", "tags": {"title": "\u65e5\u672c\u8a9e"}}, '
+               '"streams": [{"codec_type": "video", "codec_name": "h264", "width": 1280, '
+               '"height": 720, "r_frame_rate": "30/1", "pix_fmt": "yuv420p"}]}')
+        env = self._utf8_ffprobe_shim("cat <<'JSON'\n" + doc + "\nJSON\n")
+        target = OUT / "utf8_probe.mp4"
+        target.write_bytes(b"not really a movie")   # ffprobe is the shim; only the path must exist
+        proc = sh(sys.executable, SCRIPTS / "probe.py", target, "--json", env=env)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        d = json.loads(proc.stdout)
+        self.assertEqual(d["duration"], 12.0)
+        self.assertEqual(d["video"]["width"], 1280)
+        # the non-ASCII text ffprobe printed survives the capture -- the #234 surface (the path
+        # on argv is the filesystem encoding, a different axis, so it is not what is asserted)
+        self.assertEqual(d["tags"]["title"], "\u65e5\u672c\u8a9e")
+
+    @unittest.skipIf(platform.system() == "Windows", "the fake ffprobe is a #!/bin/sh script")
+    def test_probe_refuses_when_ffprobe_prints_nothing(self):
+        """The half of #234 that made it a silent defect: an empty stdout with exit 0 must never
+        become a success document of nulls."""
+        env = self._utf8_ffprobe_shim("exit 0\n")
+        target = OUT / "empty_probe.mp4"
+        target.write_bytes(b"not really a movie")
+        # this module's own sh() (line 41), not tests/_fixtures.sh: check=False means "do not
+        # raise on a non-zero exit", which is the point of the refusal being asserted below.
+        proc = sh(sys.executable, SCRIPTS / "probe.py", target, "--json", env=env, check=False)
+        self.assertNotEqual(proc.returncode, 0)
+        err = json.loads(proc.stdout)
+        self.assertEqual(err["status"], "failed")
+        self.assertEqual(err["error"]["kind"], "input")
+        self.assertIn("no output", err["error"]["message"])
+
+    @unittest.skipIf(platform.system() == "Windows", "the fake ffmpeg is a #!/bin/sh script")
+    def test_run_analysis_survives_non_utf8_locale_on_the_loudness_path(self):
+        """Review 17 finding 2: run_analysis() is the capture every ffmpeg MEASUREMENT goes
+        through -- loudness.py parses the loudnorm JSON out of its stderr. With the locale's
+        codec it raised UnicodeDecodeError inside subprocess.run: an unhandled traceback, not a
+        `status: failed` document."""
+        shim = OUT / "utf8_ffmpeg_shim"
+        shim.mkdir(parents=True, exist_ok=True)
+        (shim / "ffmpeg").write_text(
+            "#!/bin/sh\n"
+            "printf 'Input #0, mov,mp4, from \\346\\227\\245\\346\\234\\254\\350\\252\\236.mp4:\\n' >&2\n"
+            "cat >&2 <<'JSON'\n"
+            '{ "input_i" : "-18.5", "input_tp" : "-2.0", "input_lra" : "7.0", '
+            '"input_thresh" : "-28.7", "target_offset" : "0.5" }\n'
+            "JSON\n", encoding="utf-8")
+        (shim / "ffmpeg").chmod(0o755)
+        env = dict(os.environ, PATH=f"{shim}:{os.environ['PATH']}", LANG="C", LC_ALL="C",
+                   PYTHONUTF8="0", PYTHONCOERCECLOCALE="0")
+        env.pop("PYTHONIOENCODING", None)
+        code = ("import json, sys; sys.path.insert(0, %r); import loudness; "
+                "print(json.dumps(loudness.measure('x.wav', -14.0, -1.0, 11.0)))" % str(SCRIPTS))
+        proc = sh(sys.executable, "-c", code, env=env)
+        self.assertEqual(json.loads(proc.stdout)["input_i"], "-18.5")
+
+    def test_skill_md_routes_the_1_17_features(self):
+        """Eval 18: SKILL.md never mentioned filler, --snap beats, --jobs or --cache, so three
+        runs rebuilt those features by hand and one asserted the skill has no beat detection.
+        A feature nobody can find from the routing table does not exist."""
+        table = (ROOT / "SKILL.md").read_text(encoding="utf-8").split("## Request \u2192 script", 1)[1]
+        for feature, needles in (("filler words", ("silence.py", "--filler", "--words")),
+                                 ("beat-synced cuts", ("scenes.py", "--beats", "--snap beats")),
+                                 ("parallel batch", ("batch.py", "--jobs auto")),
+                                 ("the stage cache", ("render.py", "--cache"))):
+            for needle in needles:
+                self.assertIn(needle, table, f"{feature}: the routing table never names {needle}")
+
+    def test_skill_md_sanctions_one_label_for_a_partial_result(self):
+        """1.17.1: a partial result is `Done:` with the shortfall in `Notes:`. Agents were
+        inventing `Done (partially):` because the rule only said what not to write."""
+        text = (ROOT / "SKILL.md").read_text(encoding="utf-8")
+        self.assertIn("A partial result is `Done:` with the shortfall in `Notes:`", text)
+        self.assertIn("Done (partially):", text, "the forbidden label is still named, as the counter-example")
+
+    def test_eval_fixtures_stage_a_batch_recipe_with_an_absolute_output_dir(self):
+        """eval 18 bp1/bp2: the staged batch.json said "output_dir": "out", which resolves
+        against the caller's cwd, so the run wrote outside the prompt's folder and the agent had
+        to rewrite the recipe before it could answer the prompt."""
+        sys.path.insert(0, str(ROOT / "evals"))
+        import importlib
+        write_fixtures = importlib.import_module("write_fixtures")
+        with tempfile.TemporaryDirectory() as tmp:
+            outdir = Path(tmp) / "bp1"
+            written = write_fixtures.write(outdir, {"fixtures": {
+                "batch.json": json.dumps({"glob": "*.mp4", "output_dir": "out", "steps": []}),
+                "cues.txt": "0:00-0:03 hello\n"}})
+            recipe = json.loads((outdir / "batch.json").read_text(encoding="utf-8"))
+            self.assertTrue(Path(recipe["output_dir"]).is_absolute())
+            # the fixture resolves the path (macOS tempdirs live under a /var -> /private/var symlink)
+            self.assertEqual(Path(recipe["output_dir"]), (outdir / "out").resolve())
+            self.assertEqual((outdir / "cues.txt").read_text(encoding="utf-8"), "0:00-0:03 hello\n",
+                             "a non-JSON fixture is written exactly as the prompt states it")
+            self.assertEqual(len(written), 2)
+        # an absolute output_dir in the prompt is left alone -- on every OS. Path("/srv/out")
+        # .is_absolute() is False on Windows, which used to rewrite a posix-absolute dir under
+        # OUTDIR there (review 17 finding 9), so both spellings are asserted here.
+        for stated in ("/srv/out", "C:\\srv\\out"):
+            with tempfile.TemporaryDirectory() as tmp:
+                outdir = Path(tmp) / "bp2"
+                write_fixtures.write(outdir, {"fixtures": {"batch.json": json.dumps(
+                    {"glob": "*.mp4", "output_dir": stated})}})
+                self.assertEqual(
+                    json.loads((outdir / "batch.json").read_text(encoding="utf-8"))["output_dir"],
+                    stated)
+
     def test_font_fix_hint_names_the_language_and_how_to_install_one(self):
         hint = _contract._capability_fix_hint("font:ko")
         self.assertIn("Korean", hint)

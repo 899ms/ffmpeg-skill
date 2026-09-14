@@ -64,7 +64,7 @@ from typing import Any, Dict, List, Optional, Sequence
 
 from export import PRESETS, PLATFORM_OF
 from _platforms import PLATFORMS, caption_defaults, resolve as resolve_platform
-from _common import STATE, add_common, apply_common, child_args, die, emit, info, probe, run_tool, place_output, refuse_output_is_input, fingerprint, PLAN_VERSION, ffmpeg_version
+from _common import STATE, add_common, brand_caption_style, load_brand, apply_common, child_args, die, emit, info, probe, run_tool, place_output, refuse_output_is_input, fingerprint, PLAN_VERSION, ffmpeg_version
 import subprocess
 from _contract import CONTRACT_VERSION
 from batch import file_key
@@ -126,9 +126,12 @@ OBJECT_KEYS: Dict[str, frozenset] = {
     # 1.16: the picture an audio-only source gets before the rest of the chain can work on it
     "audiogram": frozenset({"image", "image_fit", "style", "position", "vis_height", "opacity",
                             "platform", "title", "color", "background", "width", "height", "fps"}),
+    # 1.17.1: fit_size / min_size / fit_size_scope, so a project can state the fit policy the
+    # templates now default to (eval 18 cs1 hit "unknown key 'fit_size'" and hand-ran the stages).
     "captions": frozenset({"text", "srt", "ass", "font", "size", "color", "position", "margin",
                            "animate", "highlight_color", "outline", "karaoke", "bold", "box",
-                           "lang", "offset", "max_lines", "min_duration"}),
+                           "lang", "offset", "max_lines", "min_duration",
+                           "fit_size", "min_size", "fit_size_scope"}),
     # the 1.14 social templates (sticker/hook/meme) take their own text and timing, so a
     # graphics[] entry can carry them too -- a template that only works from the CLI is not
     # "usable inside a render.py graphics[] entry" (review 12)
@@ -201,6 +204,23 @@ def fill_template(node: Any, values: Dict[str, Any]) -> "tuple":
     return node, True
 
 
+def brand_states_caption_size(path: Optional[str]) -> bool:
+    """True only when a brand file actually names a caption size. `--brand` alone says nothing
+    about type size -- brand_caption_style() applies no defaults -- so the presence of the flag
+    must not switch caption.py's `--fit-size auto` off (review 17 finding 1)."""
+    if not path or not os.path.isfile(path):
+        return False
+    try:
+        stated = load_brand(path).get("_stated") or {}
+    except SystemExit:
+        raise
+    except Exception:
+        return False
+    # BRAND_DEFAULTS always supplies caption.size, so only what the FILE said can answer this
+    # (the same reason brand_states_font() exists).
+    return brand_caption_style(stated).get("size") is not None
+
+
 def template_project(name: str, args) -> Dict[str, Any]:
     """One template plus the run's arguments as a ready-to-render project."""
     tpl = load_template(name)
@@ -216,6 +236,14 @@ def template_project(name: str, args) -> Dict[str, Any]:
         tpl["captions"]["margin"] = defaults["margin"]
         for key in ("position", "animate", "outline"):
             tpl["captions"].setdefault(key, defaults[key])
+        # 1.17.1: that size is the table's default, not a size anyone asked for, so it must not
+        # switch off caption.py's `--fit-size auto` the way a stated --size does -- eval 18 saw a
+        # long cue split across two consecutive cues instead of the type shrinking to fit. A
+        # template that states "fit_size" wins, and so does a brand file that STATES a caption
+        # size (that size is a statement about the look). A brand of colours or a font alone
+        # states no size, so it must not stand the fitter down: review 17 finding 1.
+        if not brand_states_caption_size(args.brand):
+            tpl["captions"].setdefault("fit_size", "on")
     output = args.output or str(template_output(args.input, name, dest))
     values = {
         "$INPUT": os.path.abspath(args.input),
@@ -510,7 +538,7 @@ def ffmpeg_banner() -> str:
     """
     try:
         out = subprocess.run(["ffprobe", "-version"], stdout=subprocess.PIPE,
-                             stderr=subprocess.DEVNULL, text=True, timeout=20).stdout
+                             stderr=subprocess.DEVNULL, text=True, encoding="utf-8", errors="replace", timeout=20).stdout
         first = (out or "").strip().splitlines()
         if first:
             return first[0].strip()
@@ -820,6 +848,9 @@ def main() -> int:
     dest = str(((proj.get("check") or {}).get("platform") or "")) if proj.get("template") else ""
     platform_args: List[str] = ["--platform", dest] if dest in PLATFORMS and PLATFORMS[dest].get("frame") else []
     stages_done: List[str] = []
+    # what the caption stage reported (wrapped/split counts and the fit-size keys), so a caller
+    # reading render.py's JSON can see whether the type was shrunk to fit or a cue was split.
+    caption_report: Optional[Dict[str, Any]] = None
 
     CACHE.clear()
     CACHE.update(_fresh_cache())
@@ -995,13 +1026,16 @@ def main() -> int:
             argv += ["--ass", rel(cap["ass"])]
         else:
             die("captions needs text, srt or ass")
-        for k, flag in (("font", "--font"), ("size", "--size"), ("color", "--color"), ("position", "--position"), ("margin", "--margin"), ("animate", "--animate"), ("highlight_color", "--highlight-color"), ("outline", "--outline"), ("lang", "--lang"), ("offset", "--offset"), ("max_lines", "--max-lines"), ("min_duration", "--min-duration")):
+        for k, flag in (("font", "--font"), ("size", "--size"), ("color", "--color"), ("position", "--position"), ("margin", "--margin"), ("animate", "--animate"), ("highlight_color", "--highlight-color"), ("outline", "--outline"), ("lang", "--lang"), ("offset", "--offset"), ("max_lines", "--max-lines"), ("min_duration", "--min-duration"),
+                        ("fit_size", "--fit-size"), ("min_size", "--min-size"), ("fit_size_scope", "--fit-size-scope")):
             if cap.get(k) is not None:
                 argv += [flag, str(cap[k])]
         for k, flag in (("karaoke", "--karaoke"), ("bold", "--bold"), ("box", "--box")):
             if cap.get(k):
                 argv.append(flag)
         sh("caption.py", *(argv + brand_args + platform_args), stage="captions")
+        if isinstance(_LAST_DOC.get("caption"), dict):
+            caption_report = dict(_LAST_DOC["caption"])
         current = nxt
         stages_done.append("captions")
     if args.stop_after == "captions":
@@ -1202,6 +1236,7 @@ def main() -> int:
         snap_report = dict(snap_reports[0])
         snap_report["clips"] = snap_reports
     emit(output, stages=stages_done, check=check_result, snap=snap_report, cache=cache_report,
+         caption=caption_report,
          verification=[{"step": "check", "ok": True, "platform": ck["platform"]}] if check_result else [])
     return 0
 

@@ -6,6 +6,13 @@
 
 (nothing yet)
 
+## 1.17.2
+
+_Automated release: version and notes generated from pull requests merged since 1.17.1._
+
+- fix: 1.17.2 — caption ASS side margins from the horizontal safe zone (#239)
+- docs: eval 19 at 1.17.1 (26 runs, the margin root cause, 1.17.2 queued) (#238)
+
 ## 1.17.1
 
 _Automated release: version and notes generated from pull requests merged since 1.17.0._

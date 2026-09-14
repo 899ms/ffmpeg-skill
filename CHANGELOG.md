@@ -6,6 +6,13 @@
 
 (nothing yet)
 
+## 1.17.3
+
+_Automated release: version and notes generated from pull requests merged since 1.17.2._
+
+- fix: 1.17.3 — SKILL.md: the cue text is burned as written; keep the template's max-lines and let the size drop (#242)
+- docs: eval 20 at 1.17.2 (20 caption runs, the picture fixed) (#241)
+
 ## 1.17.2
 
 _Automated release: version and notes generated from pull requests merged since 1.17.1._

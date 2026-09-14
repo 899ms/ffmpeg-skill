@@ -121,8 +121,9 @@ TOOL_META: Dict[str, Dict[str, Any]] = {
     "broll": dict(role="execution", inputs=["A-roll video asset", "one or more B-roll video assets (--insert)"], outputs=["video artifact of exactly the A-roll's length with the B-roll shown during each cutaway window"],
                   required=FF + [X264, AAC, "filter:overlay", "filter:amix"], optional=[HDR_X265],
                   video_required=True, audio_only=False, visual=True, verify=["probe", "look"], produces_artifact=True, idempotency="content_equivalent", deterministic=True),
-    "metadata": dict(role="execution", inputs=["video or audio asset", "chapters text file (--chapters)"], outputs=["the same streams, stream-copied, with chapter markers and/or title/artist/comment tags written"],
-                     required=FF, optional=[],
+    "metadata": dict(role="execution", inputs=["video or audio asset", "chapters text file (--chapters)"], outputs=["the same streams, stream-copied, with chapter markers and/or title/artist/comment tags written", "proposed chapter list and YouTube description block (--auto-chapters --chapters-out/--description-out)"],
+                     required=FF, optional=[{"capability": "filter:silencedetect", "when": "--auto-chapters"},
+                                            {"capability": "filter:scdet", "when": "--auto-chapters --from scenes|both"}],
                      video_required=False, audio_only=True, visual=False, verify=["probe"], produces_artifact=True, idempotency="bit_exact", deterministic=True),
     "loop": dict(role="execution", inputs=["video asset"], outputs=["video artifact repeated to the requested count or duration"],
                  required=FF + [X264, AAC], optional=[],
@@ -142,7 +143,7 @@ TOOL_META: Dict[str, Dict[str, Any]] = {
     "sequence": dict(role="execution", inputs=["a directory of numbered/globbed still images"], outputs=["video artifact built from the frame sequence"],
                       required=FF + [X264], optional=[],
                       video_required=True, audio_only=False, visual=True, verify=["probe", "look"], produces_artifact=True, idempotency="content_equivalent", deterministic=True),
-    "caption": dict(role="execution", inputs=["video asset", "SRT/ASS file or timed text (--text)"], outputs=["video artifact with burnt-in captions (--mode burn)", "video artifact with an added soft subtitle stream (--mode mux)", "generated .srt / .ass sidecar"],
+    "caption": dict(role="execution", inputs=["video asset", "SRT/ASS file or timed text (--text)"], outputs=["video artifact with burnt-in captions (--mode burn)", "video artifact with one or several language-tagged soft subtitle streams (--mode mux, --srt file:lang repeated)", "generated .srt / .ass sidecar"],
                     required=FF + [X264, AAC, "filter:subtitles"], optional=[{"capability": "filter:ass", "when": "--animate / --karaoke"}, HDR_X265, {"capability": "external:whisper", "when": "--transcribe"},
                                             {"capability": "encoder:mov_text", "when": "--mode mux with a .mp4/.m4v/.mov output"}, {"capability": "encoder:webvtt", "when": "--mode mux with a .webm output"}, {"capability": "encoder:srt", "when": "--mode mux with a .mkv output"}],
                     video_required=True, audio_only=False, visual=True, verify=["probe", "look"], produces_artifact=True, idempotency="content_equivalent", deterministic=True),
@@ -260,7 +261,7 @@ REENCODE_META: Dict[str, Dict[str, str]] = {
     "pad":      dict(video="always", audio="always", note="the tpad filter always forces a re-encode of the video stream; audio is re-encoded to AAC when present"),
     "speedramp": dict(video="always", audio="always", note="setpts/atempo per segment always forces a re-encode of both streams"),
     "broll":    dict(video="always", audio="conditional", note="the overlay graph always re-encodes the video stream; A's audio is stream-copied under --audio a and re-encoded to AAC under --audio b/mix"),
-    "metadata": dict(video="never", audio="never", note="-c copy on every stream; only the container's chapters and tags change"),
+    "metadata": dict(video="never", audio="never", note="-c copy on every stream; only the container's chapters and tags change -- --auto-chapters decodes to measure, but still writes with -c copy"),
     "loop":     dict(video="always", audio="always", note="-stream_loop always re-encodes both streams; the audio codec is always AAC when present"),
     "insert":    dict(video="always", audio="never", note="always encodes a fresh silent clip from the still image; there is no audio stream to touch"),
     "background": dict(video="always", audio="never", note="always encodes a fresh generated clip; there is no input to copy from"),
@@ -393,6 +394,20 @@ def output_schema(name: str, meta: Dict[str, Any]) -> Dict[str, Any]:
         extra = {"platform": {"type": "string"}, "ok": {"type": "boolean"}, "failed": {"type": "integer"}, "warnings": {"type": "integer"},
                  "notes": {"type": "array", "items": {"type": "string"}, "description": "present when no --platform was named: youtube was assumed and judgement rows are WARN"},
                  "checks": {"type": "array", "items": {"type": "object", "properties": {"check": {"type": "string"}, "status": {"enum": ["PASS", "WARN", "FAIL"]}, "value": {}, "expected": {}, "fix": {"type": "string"}, "kind": {"enum": ["format", "judgement"]}}}}}
+    elif name == "caption":
+        extra = {"caption": {"type": "object", "description": "cue layout: shifted / wrapped / rebalanced / split / extended / dropped counts, plus wrap ('phrase' or 'measured') and phrase_breaks (1.16)"},
+                 "tracks": {"type": "array", "description": "--mode mux: one entry per subtitle stream in the output ({index, file, language, title, codec, default, cues, kept_from_input}); a stream the input already carried has file null and kept_from_input true (1.16)"},
+                 "subtitle_tracks": {"type": "integer", "description": "--mode mux: how many subtitle streams the output carries"},
+                 "emoji": {"type": "object", "description": "how the emoji in the text were drawn (mode, overlays, missing)"},
+                 "notes": {"type": "array", "items": {"type": "string"}}}
+    elif name == "metadata":
+        extra = {"chapters": {"type": "array", "description": "the chapter markers read back off the written file"},
+                 "tags": {"type": "object"}, "streams_copied": {"type": "boolean"},
+                 "auto_chapters": {"type": "object", "description": "--auto-chapters: {source, min_chapter, max_chapters, proposed, kept, titles, chapters, description_block, files}. titles is always 'placeholder' -- the skill proposes where a chapter starts, never what it is called (1.16)"},
+                 "notes": {"type": "array", "items": {"type": "string"}}}
+    elif name == "waveform":
+        extra = {"audiogram": {"type": "object", "description": "{style, background ('image' or 'color'), image, position, vis_height, platform, captions, title, stages, verified} -- present on every run, so a plain waveform answers background 'color' (1.16)"},
+                 "notes": {"type": "array", "items": {"type": "string"}}}
     elif name == "scenes":
         extra = {"file": {"type": "string"}, "duration": {"type": "number"}, "scene_count": {"type": "integer"}, "scenes": {"type": "array"}, "audio_peaks": {"type": "array"}}
     elif name == "silence":

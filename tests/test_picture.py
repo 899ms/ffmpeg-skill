@@ -291,6 +291,32 @@ class PictureTests(MediaFixtures):
                                       f"line wider than the safe area: {line!r}")
         self.assertEqual(" ".join(l for _, lines in blocks for l in lines), text, "no word is lost or cut")
 
+    def test_phrase_wrap_burns_and_reports(self):
+        """1.16 end to end: the dl1 and dl4 cues are burnt in, the ASS the run writes carries the
+        phrase breaks, and the result document says which wrap produced them."""
+        import caption  # noqa: E402
+        cues = OUT / "wrap_phrase.txt"
+        cues.write_text("0:00-0:02 A third line the tool times for me\n"
+                        "0:02-0:04 Una tercera l\u00ednea con tiempos autom\u00e1ticos\n", encoding="utf-8")
+        out = OUT / "wrap_phrase.mp4"
+        ass = OUT / "wrap_phrase.ass"
+        res = json.loads(script("caption.py", self._small(), "--text", cues, "--size", "32",
+                                "--max-lines", "2", "--animate", "fade", "--write-ass", ass,
+                                "--json", "--fast", "-o", out).stdout)
+        self.assertEqual(res["caption"]["wrap"], "phrase")
+        self.assertIn("phrase_breaks", res["caption"])
+        self.assertTrue(out.exists())
+        body = ass.read_text(encoding="utf-8")
+        self.assertIn("A third line\\Nthe tool times for me", body)
+        self.assertIn("Una tercera l\u00ednea\\Ncon tiempos autom\u00e1ticos", body)
+        # and --wrap measured still reproduces 1.15's split, byte for byte in the ASS
+        ass2 = OUT / "wrap_measured.ass"
+        script("caption.py", self._small(), "--text", cues, "--size", "32", "--max-lines", "2",
+               "--wrap", "measured", "--animate", "fade", "--write-ass", ass2, "--fast", "-o", OUT / "wrap_measured.mp4")
+        self.assertIn("A third line the\\Ntool times for me", ass2.read_text(encoding="utf-8"))
+        self.assertEqual(caption.wrap_text("A third line the tool times for me", 12.96),
+                         ["A third line", "the tool times for me"])
+
     def test_caption_wraps_cjk_between_characters(self):
         """Chinese has no spaces: the line breaks between any two characters, and every character
         counts as a full em (Latin averages just over half)."""
@@ -735,6 +761,141 @@ class PictureTests(MediaFixtures):
         self.assertEqual(langs, ["en", "ja"])
         self.assertEqual(m["video"]["codec"], "h264", "video must stay copied through both chained calls")
         self.assertEqual(m["audio"]["codec"], "aac", "audio must stay copied through both chained calls")
+
+    def test_srt_lang_suffix_parsing(self):
+        """`FILE:lang` splits on the last colon, and only when the suffix is a language code and
+        the whole token is not itself a file on disk -- so a Windows path and a file genuinely
+        named `a:b.srt` survive."""
+        import caption  # noqa: E402
+        self.assertEqual(caption.split_srt_lang("en.srt:en"), ("en.srt", "en"))
+        self.assertEqual(caption.split_srt_lang("subs/file.srt:pt-BR"), ("subs/file.srt", "pt-BR"))
+        self.assertEqual(caption.split_srt_lang("plain.srt"), ("plain.srt", None))
+        # A Windows drive path is handled by the parser alone, with no file on disk: the drive
+        # letter is a one-character head that is not a language tag, in either slash style.
+        self.assertEqual(caption.split_srt_lang("C:\\subs\\en.srt"), ("C:\\subs\\en.srt", None))
+        self.assertEqual(caption.split_srt_lang("C:/subs/en.srt"), ("C:/subs/en.srt", None))
+        self.assertEqual(caption.split_srt_lang("D:\\media\\ja.srt"), ("D:\\media\\ja.srt", None))
+        # "the whole token is a file on disk, so do not split it" -- exercised with a colon-free
+        # name, which every OS can create.
+        plain = OUT / "suffix_plain.srt"
+        plain.write_text("1\n00:00:00,000 --> 00:00:01,000\nx\n", encoding="utf-8")
+        self.assertEqual(caption.split_srt_lang(str(plain)), (str(plain), None))
+        if platform.system() != "Windows":
+            # ... and, where the filesystem allows it, with a name that really contains a colon
+            odd = OUT / "a:b.srt"
+            odd.write_text("1\n00:00:00,000 --> 00:00:01,000\nx\n", encoding="utf-8")
+            self.assertEqual(caption.split_srt_lang(str(odd)), (str(odd), None))
+        # MPEG-4 needs the ISO-639-2 spelling (verified empirically: ffmpeg silently writes NO
+        # language tag for a two-letter code in .mp4); Matroska stores what it is given.
+        self.assertEqual(caption.container_language("ja", "x.mp4"), "jpn")
+        self.assertEqual(caption.container_language("ja", "x.mkv"), "ja")
+
+    def test_duplicate_language_and_bad_code_are_refused(self):
+        srt = OUT / "mux_dup.srt"
+        srt.write_text("1\n00:00:00,000 --> 00:00:02,000\nHello\n", encoding="utf-8")
+        script("caption.py", self.src, "--mode", "mux", "--srt", f"{srt}:en", "--srt", f"{srt}:en",
+               "-o", OUT / "dup.mkv", expect_fail=True)
+        script("caption.py", self.src, "--mode", "mux", "--srt", f"{srt}:en",
+               "--default-track", "ja", "-o", OUT / "dup2.mkv", expect_fail=True)
+        # a suffix meant as a language code but shaped wrong is a language error naming the
+        # token, not "SRT file not found: en.srt:zzzz"
+        proc = script("caption.py", self.src, "--mode", "mux", "--srt", f"{srt}:zzzzzzzzzzz",
+                      "-o", OUT / "dup3.mkv", "--json", expect_fail=True)
+        doc = json.loads(proc.stdout)
+        self.assertEqual(doc["error"]["kind"], "input")
+        self.assertIn("zzzzzzzzzzz", doc["error"]["message"])
+        self.assertIn("not a language code", doc["error"]["message"])
+        # a genuinely missing file still says so
+        missing = script("caption.py", self.src, "--mode", "mux",
+                         "--srt", str(OUT / "no_such_file.srt") + ":en",
+                         "-o", OUT / "dup4.mkv", expect_fail=True)
+        self.assertIn("not found", missing.stderr)
+
+    def test_burn_with_two_srts_refused(self):
+        srt = OUT / "mux_burn2.srt"
+        srt.write_text("1\n00:00:00,000 --> 00:00:02,000\nHello\n", encoding="utf-8")
+        script("caption.py", self.src, "--srt", f"{srt}:en", "--srt", f"{srt}:ja",
+               "-o", OUT / "burn2.mp4", expect_fail=True)
+
+    def test_mux_three_languages_into_mkv(self):
+        """Three tracks in one call: nothing re-encoded, every stream tagged, and check.py's new
+        informational `subtitles` row lists all three."""
+        files = {}
+        for lang, text in (("en", "Hello"), ("ja", "\u3053\u3093\u306b\u3061\u306f"), ("es", "Hola")):
+            f = OUT / f"mux3_{lang}.srt"
+            f.write_text(f"1\n00:00:00,000 --> 00:00:02,000\n{text}\n", encoding="utf-8")
+            files[lang] = f
+        out = OUT / "cap_mux3.mkv"
+        res = json.loads(script("caption.py", self.src, "--mode", "mux",
+                                "--srt", f"{files['en']}:en", "--srt", f"{files['ja']}:ja",
+                                "--srt", f"{files['es']}:es", "--default-track", "en",
+                                "--json", "-o", out).stdout)
+        self.assertEqual(res["subtitle_tracks"], 3)
+        self.assertEqual([t["language"] for t in res["tracks"]], ["en", "ja", "es"])
+        self.assertEqual([t["default"] for t in res["tracks"]], [True, False, False])
+        disp = sh("ffprobe", "-v", "error", "-select_streams", "s", "-show_entries",
+                  "stream_disposition=default", "-of", "csv=p=0", out).stdout.split()
+        self.assertEqual(disp, ["1", "0", "0"], "the file disagrees with tracks[].default")
+        self.assertEqual(res["tracks"][1]["title"], "\u65e5\u672c\u8a9e")
+        src_m, m = probe(str(self.src)), probe(str(out))
+        self.assertEqual(m["subtitle_streams"], 3)
+        # ffprobe reports Matroska's codes verbatim (empirically: `en`, not `eng`)
+        langs = sh("ffprobe", "-v", "error", "-select_streams", "s", "-show_entries",
+                   "stream_tags=language", "-of", "csv=p=0", out).stdout.split()
+        self.assertEqual(langs, ["en", "ja", "es"])
+        self.assertEqual(m["video"]["codec"], src_m["video"]["codec"], "video was re-encoded")
+        self.assertEqual(m["audio"]["codec"], src_m["audio"]["codec"], "audio was re-encoded")
+        chk = json.loads(script("check.py", out, "--platform", "youtube", "--no-loudness",
+                                "--json").stdout)
+        subs_row = [r for r in chk["checks"] if r["check"] == "subtitles"]
+        self.assertEqual(len(subs_row), 1)
+        self.assertEqual(subs_row[0]["status"], "PASS")
+        for code in ("en", "ja", "es"):
+            self.assertIn(code, subs_row[0]["value"])
+
+    def test_mux_without_default_track_leaves_every_matroska_track_off(self):
+        """Given two or more new subtitle streams and no --default-track, ffmpeg flags the first
+        one `default` by itself -- the opposite of what the flag promises, and `tracks[].default`
+        then described a file that did not exist. Every disposition is stated explicitly now."""
+        files = []
+        for lang in ("en", "ja"):
+            f = OUT / f"mux_nodef_{lang}.srt"
+            f.write_text("1\n00:00:00,000 --> 00:00:02,000\nx\n", encoding="utf-8")
+            files.append(f"{f}:{lang}")
+        out = OUT / "cap_mux_nodef.mkv"
+        res = json.loads(script("caption.py", self.src, "--mode", "mux",
+                                *[a for f in files for a in ("--srt", f)],
+                                "--json", "-o", out).stdout)
+        disp = sh("ffprobe", "-v", "error", "-select_streams", "s", "-show_entries",
+                  "stream_disposition=default", "-of", "csv=p=0", out).stdout.split()
+        self.assertEqual(disp, ["0", "0"], "a track was marked default that nobody asked for")
+        self.assertEqual([t["default"] for t in res["tracks"]], [False, False])
+
+    def test_mux_into_mp4_converts_to_iso639_2_and_warns_about_players(self):
+        """Empirically, an .mp4 keeps three mov_text tracks but drops a two-letter language code
+        outright -- so the code is converted and the caller is told the container is the wrong
+        one for a switchable deliverable."""
+        files = []
+        for lang in ("en", "ja", "es"):
+            f = OUT / f"mux3mp4_{lang}.srt"
+            f.write_text("1\n00:00:00,000 --> 00:00:02,000\nx\n", encoding="utf-8")
+            files.append(f"{f}:{lang}")
+        out = OUT / "cap_mux3.mp4"
+        res = json.loads(script("caption.py", self.src, "--mode", "mux", *[a for f in files for a in ("--srt", f)],
+                                "--json", "-o", out).stdout)
+        self.assertEqual([t["language"] for t in res["tracks"]], ["eng", "jpn", "spa"])
+        langs = sh("ffprobe", "-v", "error", "-select_streams", "s", "-show_entries",
+                   "stream_tags=language", "-of", "csv=p=0", out).stdout.split()
+        self.assertEqual(langs, ["eng", "jpn", "spa"])
+        self.assertTrue(any(".mkv" in n for n in res.get("notes") or []), res.get("notes"))
+        # MPEG-4 stores no per-track title ffprobe reads back, so none is claimed
+        self.assertEqual([t["title"] for t in res["tracks"]], [None, None, None])
+        self.assertEqual(sh("ffprobe", "-v", "error", "-select_streams", "s", "-show_entries",
+                            "stream_tags=title", "-of", "csv=p=0", out).stdout.split(), [])
+        # ... and it always enables its first subtitle track, which tracks[] must not deny
+        disp = sh("ffprobe", "-v", "error", "-select_streams", "s", "-show_entries",
+                  "stream_disposition=default", "-of", "csv=p=0", out).stdout.split()
+        self.assertEqual([("1" if t["default"] else "0") for t in res["tracks"]], disp)
 
     def test_caption_mux_picks_the_subtitle_codec_from_the_container(self):
         srt = OUT / "mux_container_cues.srt"
@@ -2124,6 +2285,212 @@ class WrapReadabilityTests(unittest.TestCase):
                 with self.subTest(text=text[:12], max_em=max_em):
                     self.assertEqual(len(C.wrap_text(text, max_em)),
                                      len(C.wrap_text(text, max_em, balance=False)))
+
+
+class PhraseWrapTests(unittest.TestCase):
+    """1.16: the four phrase rules (R1 never inside a word, R2 no weak line, R3 ja/zh preferred
+    break points, R4 no function word at the end of a line), locked against the eval-16 cues."""
+
+    # The em width a caption line has at a real destination's caption size, computed from the
+    # platform table rather than pinned as a magic float (the size, the frame and the safe-area
+    # fraction can all move; the test should move with them).
+    @staticmethod
+    def _max_em(platform_name):
+        sys.path.insert(0, str(SCRIPTS))
+        import importlib
+        _platforms = importlib.import_module("_platforms")
+        caption = importlib.import_module("caption")
+        frame = _platforms.PLATFORMS[platform_name]["frame"]
+        cap = _platforms.caption_defaults(platform_name)
+        size_px = cap["size"] * frame["h"] / 288.0
+        return (frame["w"] * caption.SAFE_WIDTH_FRACTION) / size_px
+
+    def setUp(self):
+        sys.path.insert(0, str(SCRIPTS))
+        import importlib
+        self.caption = importlib.import_module("caption")
+        self.W = self._max_em("linkedin")     # 12.96 em: wide enough for a two-line cue
+        self.NARROW = self._max_em("tiktok")  # 6.075 em: the vertical caption width
+
+    # -------------------------------------------------------------- R1: never inside a word
+    def test_wrap_never_splits_inside_a_word(self):
+        C = self.caption
+        corpus = [
+            "A third line the tool times for me",
+            "Segunda linea de subtitulos con acentos",
+            "one two three four five six seven eight nine ten",
+            "\u3053\u3093\u306b\u3061\u306f\u3001\u4e16\u754c 2 \u884c\u76ee\u306e\u5b57\u5e55\u3067\u3059",
+            "\u0e2a\u0e27\u0e31\u0e2a\u0e14\u0e35\u0e0a\u0e32\u0e27\u0e42\u0e25\u0e01 \u0e40\u0e2a\u0e35\u0e22\u0e07\u0e19\u0e49\u0e33\u0e44\u0e2b\u0e25",
+        ]
+        for text in corpus:
+            for max_em in (4.0, 6.075, 9.0, 12.96, 20.0):
+                with self.subTest(text=text[:12], max_em=max_em):
+                    lines = C.wrap_text(text, max_em)
+                    self.assertEqual("".join(lines).replace(" ", ""), text.replace(" ", ""))
+                    # every boundary between two spaced-script lines stood at a space or a hyphen
+                    for a, b in zip(lines, lines[1:]):
+                        if not a or not b:
+                            continue
+                        spaced = C.char_script(a[-1]) not in C.NO_SPACE_SCRIPTS \
+                            and C.char_script(b[0]) not in C.NO_SPACE_SCRIPTS
+                        if not spaced:
+                            continue   # a no-space script breaks between characters by design
+                        if not C._break_spaced(a, b):
+                            self.assertTrue(a.endswith(("-", "\u2010")),
+                                            "broke inside a word: %r | %r" % (a, b))
+
+    def test_wrap_breaks_a_hyphenated_word_only_after_the_hyphen(self):
+        C = self.caption
+        lines = C.wrap_text("an end-to-end example", 6.0)
+        self.assertEqual("".join(lines).replace(" ", ""), "anend-to-endexample")
+        for a, b in zip(lines, lines[1:]):
+            if a and b and not C._break_spaced(a, b):
+                self.assertTrue(a.endswith("-"), "broke inside a word: %r | %r" % (a, b))
+        # a non-breaking hyphen is never a break point
+        self.assertEqual(C._split_hyphens([("well\u2011known", False)]), [("well\u2011known", False)])
+        # ... and neither is a leading or trailing one
+        self.assertEqual(C._split_hyphens([("-5", False)]), [("-5", False)])
+
+    # -------------------------------------------------------------- R2: no weak line
+    def test_is_weak_line_names_the_lines_no_reader_should_get(self):
+        C = self.caption
+        for weak in ("2", "--", "\u3066", "\u30f3", " "):
+            self.assertTrue(C._is_weak_line(weak), repr(weak))
+        for fine in ("me", "\u4e16\u754c", "\u0e44\u0e2b\u0e25"):
+            self.assertFalse(C._is_weak_line(fine), repr(fine))
+
+    def test_dl3_cue_exact_split(self):
+        """dl3: no line that is a lone digit; the break is not between a kanji stem and its
+        okurigana (`\u6c7a\u307e` | `\u308b`); and no line OPENS with a particle -- a particle is
+        enclitic, so kinsoku keeps it with the word before it."""
+        C = self.caption
+        jp = "\u81ea\u52d5\u3067\u30bf\u30a4\u30df\u30f3\u30b0\u304c\u6c7a\u307e\u308b\u884c"
+        for max_em in (self.NARROW, self.W, 10.0, 14.0):
+            with self.subTest(max_em=max_em):
+                lines = C.wrap_text("2 \u884c\u76ee\u306e\u5b57\u5e55\u3067\u3059", max_em)
+                self.assertNotIn("2", lines, lines)
+                lines = C.wrap_text(jp, max_em)
+                for a, b in zip(lines, lines[1:]):
+                    self.assertFalse(a.endswith("\u6c7a\u307e") and b.startswith("\u308b"),
+                                     "broke inside \u6c7a\u307e\u308b: %r" % (lines,))
+                    self.assertNotIn(b[0], C.JA_PARTICLES,
+                                     "a line opens with a particle: %r" % (lines,))
+        # the break falls after \u304c, not before it
+        self.assertEqual(C.wrap_text(jp, 10.0),
+                         ["\u81ea\u52d5\u3067\u30bf\u30a4\u30df\u30f3\u30b0\u304c", "\u6c7a\u307e\u308b\u884c"])
+        self.assertEqual(C.wrap_text(jp, self.W),
+                         ["\u81ea\u52d5\u3067\u30bf\u30a4\u30df\u30f3\u30b0\u304c", "\u6c7a\u307e\u308b\u884c"])
+
+    def test_th1_cue_exact_split(self):
+        """th1: the trailing line is never the stranded `\u0e44\u0e2b\u0e25` alone."""
+        C = self.caption
+        text = "\u0e2a\u0e27\u0e31\u0e2a\u0e14\u0e35\u0e0a\u0e32\u0e27\u0e42\u0e25\u0e01 \u0e40\u0e2a\u0e35\u0e22\u0e07\u0e19\u0e49\u0e33\u0e44\u0e2b\u0e25"
+        for max_em in (self.NARROW, 8.0, self.W):
+            with self.subTest(max_em=max_em):
+                lines = C.wrap_text(text, max_em)
+                self.assertNotEqual(lines[-1].strip(), "\u0e44\u0e2b\u0e25", lines)
+                self.assertFalse(C._is_weak_line(lines[-1]), lines)
+
+    # -------------------------------------------------------------- R4: function words
+    def test_function_word_never_ends_a_line(self):
+        C = self.caption
+        cases = {
+            "en": "A third line the tool times for me",
+            "es": "Una tercera linea con tiempos automaticos",
+            "pt": "Uma terceira linha com tempos automaticos",
+            "fr": "La ligne trois avec temps automatiques",
+            "de": "Zeile drei zeigt die Zeiten automatisch",
+            "it": "Una terza riga con i tempi automatici",
+        }
+        for lang, text in cases.items():
+            with self.subTest(lang=lang):
+                lines = C.wrap_text(text, self.W, lang=lang)
+                for line in lines[:-1]:
+                    last = C._bare_word(line.split(" ")[-1])
+                    self.assertNotIn(last, C._function_words(lang),
+                                     "%s: line ends on a function word: %r" % (lang, lines))
+                # and the rule works by preferring the break BEFORE the word, not only by
+                # vetoing the one after it
+                self.assertNotEqual(lines, C.wrap_text(text, self.W, mode="measured"),
+                                    "%s: the greedy break did not move" % lang)
+
+    def test_dl4_cue_exact_split(self):
+        """dl4, both cues, at the width that reproduced the eval-16 splits."""
+        C = self.caption
+        self.assertEqual(C.wrap_text("Segunda l\u00ednea de subt\u00edtulos", self.W, lang="es"),
+                         ["Segunda l\u00ednea", "de subt\u00edtulos"])
+        self.assertEqual(C.wrap_text("Una tercera l\u00ednea con tiempos autom\u00e1ticos", self.W, lang="es"),
+                         ["Una tercera l\u00ednea", "con tiempos autom\u00e1ticos"])
+
+    def test_dl1_cue_exact_split(self):
+        """dl1. R4 scores both directions: `the` opens the phrase it governs, so the break BEFORE
+        it is the preferred one and the break after it the penalised one. Both halves fit, so the
+        cue comes out as one whole phrase per line. `--wrap measured` still gives 1.15's split."""
+        C = self.caption
+        text = "A third line the tool times for me"
+        for max_em in (self.W, 14.0, 16.0):
+            with self.subTest(max_em=max_em):
+                self.assertEqual(C.wrap_text(text, max_em, lang="en"),
+                                 ["A third line", "the tool times for me"])
+        self.assertEqual(C.wrap_text(text, self.W, mode="measured"),
+                         ["A third line the", "tool times for me"])
+
+    # -------------------------------------------------------------- modes and invariants
+    def test_wrap_measured_is_byte_identical_to_1_15(self):
+        """`--wrap measured` reproduces the outputs the 1.15 tests pinned."""
+        C = self.caption
+        self.assertEqual(C.wrap_text("A third line the tool times for me", 14.0, mode="measured"),
+                         ["A third line the", "tool times for me"])
+        self.assertEqual(C.wrap_text("A third line the tool times for me", 14.0,
+                                     balance=False, mode="measured"),
+                         ["A third line the tool times", "for me"])
+        self.assertEqual(C.wrap_text("Segunda l\u00ednea de subt\u00edtulos", self.W, mode="measured"),
+                         ["Segunda l\u00ednea", "de subt\u00edtulos"])
+
+    def test_wrap_line_count_never_grows(self):
+        C = self.caption
+        corpus = ["A third line the tool times for me", "Hello world",
+                  "one two three four five six seven eight nine ten",
+                  "Una tercera l\u00ednea con tiempos autom\u00e1ticos",
+                  "\u3053\u3093\u306b\u3061\u306f\u3001\u4e16\u754c\u306e\u5b57\u5e55\u3067\u3059",
+                  "\u81ea\u52d5\u3067\u30bf\u30a4\u30df\u30f3\u30b0\u304c\u6c7a\u307e\u308b\u884c",
+                  "an end-to-end example of a long hyphenated line"]
+        for text in corpus:
+            for max_em in range(4, 30):
+                with self.subTest(text=text[:12], max_em=max_em):
+                    for mode in ("phrase", "measured"):
+                        self.assertEqual(len(C.wrap_text(text, float(max_em), mode=mode)),
+                                         len(C.wrap_text(text, float(max_em), balance=False)),
+                                         mode)
+
+    def test_multi_character_particles_are_matched_as_words_not_characters(self):
+        """から / まで / より are two-character particles. Keeping them in the CHARACTER table made
+        か, ら, ま, で, よ and り one-character particles of their own, which none of them is."""
+        C = self.caption
+        for ch in "\u304b\u3089\u307e\u3088\u308a":
+            self.assertNotIn(ch, C.JA_PARTICLES, "%r is not a particle on its own" % ch)
+        # \u304b after a kanji stem is okurigana, not a forbidden line start
+        self.assertEqual(C.break_penalty("\u6f22", "\u304b", "ja",
+                                         before="\u6f22", after="\u304b\u305f\u3061"), 0.9)
+        # the whole word is seen when the caller passes the surrounding text
+        self.assertEqual(C.break_penalty("\u305f", "\u304b", "ja",
+                                         before="\u898b\u305f", after="\u304b\u3089\u3067\u3059"), 1.0)
+        self.assertEqual(C.break_penalty("\u3089", "\u8a71", "ja",
+                                         before="\u898b\u305f\u304b\u3089", after="\u8a71\u3057\u305f"), 0.2)
+        # ... and a \u3089 that merely ends a word is not a particle
+        self.assertEqual(C.break_penalty("\u3089", "\u8a71", "ja",
+                                         before="\u3055\u304f\u3089", after="\u8a71\u3057\u305f"), 0.5)
+
+    def test_break_penalty_prefers_a_sentence_end_and_a_particle(self):
+        C = self.caption
+        self.assertEqual(C.break_penalty("\u3002", "\u6b21", "ja"), 0.0)
+        # a particle keeps company with the word BEFORE it: breaking after one is preferred,
+        # breaking before one is forbidden
+        self.assertEqual(C.break_penalty("\u306f", "\u4e16", "ja"), 0.2)   # after a particle
+        self.assertEqual(C.break_penalty("\u754c", "\u306f", "ja"), 1.0)   # before a particle
+        self.assertLess(C.break_penalty("\u306f", "\u4e16", "ja"),         # after a particle
+                        C.break_penalty("\u6c7a", "\u307e", "ja"))         # inside a word
+        self.assertEqual(C.break_penalty("\u3042", "\u3063", "ja"), 1.0)  # small kana may not start a line
 
 
 if __name__ == "__main__":

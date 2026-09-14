@@ -38,11 +38,23 @@ import re
 import sys
 import unicodedata
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from _platforms import PLATFORMS, PLATFORM_CHOICES, ass_units, resolve as resolve_platform
 from _ass_overlay import EMOJI_SENTINEL, emoji_placeholder, ass_escape
-from _common import emoji_filter_chain, EMOJI_ASSET_HINT, emoji_asset_for, emoji_codepoint_name, emoji_support, resolve_emoji_assets, ADVANCE_EM, LATIN_EM, LEADING_VOWELS, NO_SPACE_SCRIPTS, _char_em, _is_mark, text_width_em, emoji_clusters, has_emoji, detect_script, BIDI_SCRIPTS, STATE, brand_states_font, char_script, script_font_for_text, signed_time_arg, brand_caption_style, color_hex, load_brand, video_args, add_common, apply_common, emit, aac_args, cfr_args, default_output, die, escape_filter_path, ffmpeg_base, fmt_srt_time, fmt_smpte_time, info, MissingFpsError, parse_time, probe, run, x264_args, X264_PRESETS, read_text_or_die, fmt_secs
+from _common import emoji_filter_chain, EMOJI_ASSET_HINT, emoji_asset_for, emoji_codepoint_name, emoji_support, resolve_emoji_assets, ADVANCE_EM, LATIN_EM, NO_SPACE_SCRIPTS, _char_em, char_script, text_width_em, emoji_clusters, has_emoji, detect_script, BIDI_SCRIPTS, STATE, brand_states_font, script_font_for_text, signed_time_arg, brand_caption_style, color_hex, load_brand, video_args, add_common, apply_common, emit, aac_args, cfr_args, default_output, die, escape_filter_path, ffmpeg_base, fmt_srt_time, fmt_smpte_time, info, MissingFpsError, parse_time, probe, run, x264_args, X264_PRESETS, read_text_or_die, fmt_secs
+# The line breaker, lifted into _common/text.py in 1.16.0 so graphics.py can use the same rules.
+from _common import (SAFE_WIDTH_FRACTION, ORPHAN_MIN_EM, WRAP_MODES, wrap_text, wrap_variants, best_break,
+                     break_penalty, _is_weak_line, _atoms, _join, _break_spaced, _bare_word, _function_words,
+                     _split_hyphens, FUNCTION_WORDS, JA_PARTICLES, JA_SENTENCE_END, _fix_orphans, _rebalance)
+
+# The breaker's names are caption.py's public surface as much as _common's: every caller and test
+# that reached for `caption.wrap_text` before 1.16 still does.
+__all__ = ["SAFE_WIDTH_FRACTION", "ORPHAN_MIN_EM", "WRAP_MODES", "wrap_text", "wrap_variants",
+           "best_break", "break_penalty", "_is_weak_line", "_atoms", "_join", "_break_spaced",
+           "_bare_word", "_function_words", "_split_hyphens", "FUNCTION_WORDS", "JA_PARTICLES",
+           "JA_SENTENCE_END", "_fix_orphans", "_rebalance", "char_script", "NO_SPACE_SCRIPTS",
+           "text_width_em"]
 
 ALIGN = {"bottom": 2, "top": 8, "center": 5, "bottom-left": 1, "bottom-right": 3, "top-left": 7, "top-right": 9}
 
@@ -299,187 +311,6 @@ def word_durations_from_audio(video: str, start: float, end: float, n_words: int
     return out
 
 
-# How much of the frame width a caption line may use. libass's own default SRT margins are 10 of a
-# 384-wide script (2.6 % a side); 5 % a side is the safe area every platform check in this repo uses.
-SAFE_WIDTH_FRACTION = 0.9
-# ORPHAN_MIN_EM: one full-width CJK/Thai character plus a hair. A last line narrower than this is a
-# single stranded character -- eval 14's th1 (a lone 'ล') and dl3 (a lone '行').
-ORPHAN_MIN_EM = 1.1
-
-
-def _atoms(line: str) -> List[Tuple[str, bool]]:
-    """Break a line into the smallest pieces a wrap may separate -- one atom per CJK/Thai
-    character, one per emoji cluster, one per whitespace-delimited word otherwise -- each with
-    whether a space stood before it in the original. The flag is what puts the text back together
-    exactly as written: "Hello 世界" keeps its space, "世界です" gains none."""
-    out: List[Tuple[str, bool]] = []
-    word = ""
-    spaced = False        # a space stands before the atom being built
-    pending = False       # a space stands before the NEXT atom
-    attach_next = False   # a leading Thai/Lao vowel is waiting for its base consonant
-    # An emoji cluster is one atom: a wrap must never land inside a ZWJ sequence, a flag pair or
-    # between a base and its skin-tone modifier (the same rule combining marks already follow).
-    clusters = {i: len(cl) for i, cl in emoji_clusters(line)}
-    i = 0
-    while i < len(line):
-        ch = line[i]
-        if i in clusters:
-            cluster = line[i:i + clusters[i]]
-            if word:
-                out.append((word, spaced))
-                word = ""
-            out.append((cluster, pending))
-            pending = False
-            attach_next = False
-            i += clusters[i]
-            continue
-        i += 1
-        if char_script(ch) in NO_SPACE_SCRIPTS:
-            if word:
-                out.append((word, spaced))
-                word = ""
-            if out and (attach_next or _is_mark(ch)):
-                # never break between a base and the mark (or the leading vowel) that belongs to
-                # it: the line would start with an orphaned tone mark or vowel sign
-                out[-1] = (out[-1][0] + ch, out[-1][1])
-            else:
-                out.append((ch, pending))
-                pending = False
-            attach_next = ord(ch) in LEADING_VOWELS
-        elif ch.isspace():
-            if word:
-                out.append((word, spaced))
-                word = ""
-            pending = True
-        else:
-            if not word:
-                spaced, pending = pending, False
-            word += ch
-    if word:
-        out.append((word, spaced))
-    return out
-
-
-def _join(left: str, atom: str, spaced: bool) -> str:
-    """Put an atom back on a line, restoring the space that stood before it."""
-    if not left:
-        return atom
-    return left + (" " if spaced else "") + atom
-
-
-def _break_spaced(first: str, second: str) -> bool:
-    """Did a space stand at the break between these two wrapped lines? Only spaced scripts put one
-    there -- a CJK/Thai break sits between two characters that were written with nothing between
-    them, and re-joining them with a space would insert a character the cue never had."""
-    if not first or not second:
-        return False
-    return char_script(first[-1]) not in NO_SPACE_SCRIPTS and char_script(second[0]) not in NO_SPACE_SCRIPTS \
-        and char_script(first[-1]) != "emoji" and char_script(second[0]) != "emoji"
-
-
-def _fix_orphans(lines: List[str], max_em: float) -> List[str]:
-    """No last line that is a single stranded atom.
-
-    Greedy wrapping leaves one character alone whenever the line before it filled exactly: eval 14
-    produced a Thai cue ending in a lone `ล` and a Japanese one ending in a lone `行`. While the
-    last line is one atom narrower than ORPHAN_MIN_EM, the last atom of the line above moves down
-    onto it -- but only while the result still fits and the line above does not become an orphan
-    itself, so a two-word cue is never made worse."""
-    lines = list(lines)
-    for _ in range(len(lines)):
-        if len(lines) < 2:
-            break
-        tail = _atoms(lines[-1])
-        if len(tail) != 1 or text_width_em(lines[-1]) >= ORPHAN_MIN_EM:
-            break
-        prev = _atoms(lines[-2])
-        if len(prev) < 2:
-            break
-        moved, spaced = prev[-1]
-        new_prev = ""
-        for atom, sp in prev[:-1]:
-            new_prev = _join(new_prev, atom, sp)
-        new_last = _join(moved, tail[0][0], _break_spaced(lines[-2], lines[-1]))
-        if text_width_em(new_last) > max_em or text_width_em(new_prev) < ORPHAN_MIN_EM:
-            break
-        lines[-2], lines[-1] = new_prev, new_last
-    return lines
-
-
-def _rebalance(lines: List[str], max_em: float) -> List[str]:
-    """Move each break to the one that minimises the widest line of the pair, without changing the
-    line count.
-
-    Greedy wrapping fills line 1 to the brim and leaves line 2 short, which is what split eval 14's
-    `"A third line the tool times for me"` mid-phrase. Only spaced scripts are rebalanced: a
-    non-spaced script has no phrase structure in its atom list, so moving the break there only
-    moves the ragged edge. A break is never placed before a punctuation-only atom."""
-    if len(lines) < 2:
-        return lines
-    out = list(lines)
-    for i in range(len(out) - 1):
-        first, second = out[i], out[i + 1]
-        tail_atoms = _atoms(second)
-        if tail_atoms:
-            tail_atoms[0] = (tail_atoms[0][0], _break_spaced(first, second))
-        atoms = _atoms(first) + tail_atoms
-        if not atoms or any(char_script(ch) in NO_SPACE_SCRIPTS for ch in first + second):
-            continue
-        best = None
-        for cut in range(1, len(atoms)):
-            if not atoms[cut][1]:
-                continue  # only break where a space stood
-            if all(not ch.isalnum() for ch in atoms[cut][0]):
-                continue  # never strand punctuation at the start of a line
-            a = b = ""
-            for atom, sp in atoms[:cut]:
-                a = _join(a, atom, sp)
-            for atom, sp in atoms[cut:]:
-                b = _join(b, atom, sp)
-            wa, wb = text_width_em(a), text_width_em(b)
-            if max(wa, wb) > max_em:
-                continue
-            key = (max(wa, wb), abs(wa - wb))
-            if best is None or key < best[0]:
-                best = (key, a, b)
-        if best is not None:
-            out[i], out[i + 1] = best[1], best[2]
-    return out
-
-
-def wrap_text(text: str, max_em: float, *, balance: bool = True) -> List[str]:
-    """Wrap `text` to lines no wider than `max_em` em, keeping the manual breaks it already has.
-
-    An atom wider than the whole line (one very long word) is left alone on its line rather than
-    cut mid-word: an over-long line is readable, a chopped word is not. Two post-passes then make
-    the result readable rather than merely legal (1.15): no one-character orphan line, and for
-    spaced scripts a break chosen to minimise the widest line instead of greedily.
-    """
-    lines: List[str] = []
-    for raw in text.split("\n"):
-        if not raw.strip():
-            continue
-        current = ""
-        chunk: List[str] = []
-        for atom, spaced in _atoms(raw):
-            candidate = _join(current, atom, spaced)
-            if current and text_width_em(candidate) > max_em:
-                chunk.append(current)
-                current = atom
-            else:
-                current = candidate
-        if current:
-            chunk.append(current)
-        if balance and len(chunk) > 1:
-            fixed = _fix_orphans(chunk, max_em)
-            rebalanced = _rebalance(fixed, max_em)
-            if len(rebalanced) == len(chunk):
-                chunk = rebalanced
-            else:
-                chunk = fixed
-        lines.extend(chunk)
-    return lines or [text]
-
 
 # --------------------------------------------------------------------------- emoji (1.15)
 def _cue_lines(text: str) -> List[str]:
@@ -602,7 +433,8 @@ def plan_emoji(cues, args, play_w, play_h, brand=None):
 
 
 def layout_cues(cues: List[Tuple[float, float, str]], *, max_em: Optional[float], max_lines: int,
-                min_duration: float, offset: float) -> Tuple[List[Tuple[float, float, str]], dict]:
+                min_duration: float, offset: float, wrap: str = "phrase",
+                lang: Optional[str] = None) -> Tuple[List[Tuple[float, float, str]], dict]:
     """Shift, wrap, split and lengthen cues so they can actually be read.
 
     `offset` moves every cue (a transcript that runs early/late); `max_em` wraps each cue to the
@@ -611,7 +443,8 @@ def layout_cues(cues: List[Tuple[float, float, str]], *, max_em: Optional[float]
     proportion to their text; a cue shorter than `min_duration` is lengthened, never past the next
     cue's start. Returns the new cues and a count of what changed.
     """
-    stats = {"shifted": 0, "wrapped": 0, "split": 0, "extended": 0, "dropped": 0, "rebalanced": 0}
+    stats = {"shifted": 0, "wrapped": 0, "split": 0, "extended": 0, "dropped": 0, "rebalanced": 0,
+             "wrap": wrap, "phrase_breaks": 0}
     staged: List[Tuple[float, float, str]] = []
     for start, end, text in cues:
         if offset:
@@ -622,11 +455,16 @@ def layout_cues(cues: List[Tuple[float, float, str]], *, max_em: Optional[float]
             start = max(0.0, start)
             stats["shifted"] += 1
         if max_em and max_em > 0:
-            lines = wrap_text(text, max_em)
+            # one greedy fill per cue, three answers off it: what gets burnt in, what the
+            # greedy wrap would have given (`rebalanced`) and what 1.15's wrap would have
+            # given (`phrase_breaks`). Three wrap_text() calls re-ran the atomiser each time.
+            lines, greedy, measured = wrap_variants(text, max_em, mode=wrap, lang=lang)
             if lines != [l for l in text.split("\n") if l.strip()]:
                 stats["wrapped"] += 1
-            if lines != wrap_text(text, max_em, balance=False):
+            if lines != greedy:
                 stats["rebalanced"] += 1
+            if wrap != "measured" and lines != measured:
+                stats["phrase_breaks"] += 1
             if len(lines) > max_lines:
                 chunks = [lines[i:i + max_lines] for i in range(0, len(lines), max_lines)]
                 weights = [max(1.0, sum(len(l) for l in c)) for c in chunks]
@@ -654,7 +492,7 @@ def layout_cues(cues: List[Tuple[float, float, str]], *, max_em: Optional[float]
 
 def report_layout(stats: dict) -> None:
     """One info line, only when a cue actually changed."""
-    parts = [f"{stats[k]} {k}" for k in ("shifted", "wrapped", "rebalanced", "split", "extended", "dropped") if stats.get(k)]
+    parts = [f"{stats[k]} {k}" for k in ("shifted", "wrapped", "rebalanced", "phrase_breaks", "split", "extended", "dropped") if stats.get(k)]
     if parts:
         info("cues: " + ", ".join(parts))
 
@@ -842,6 +680,93 @@ def write_ass(cues: List[Tuple[float, float, str]], path: str, args, play_w: int
         fh.write("\n".join(header + lines) + "\n")
 
 
+# ------------------------------------------------------- multi-language subtitle tracks (1.16)
+
+class AppendPath(argparse.Action):
+    """`--srt` repeated, without changing what the contract says `--srt` is.
+
+    `action="append"` would make the derived JSON Schema an array (`_contract._json_type`), and the
+    1.x guarantee says no argument changes type -- an MCP client that sends `{"srt": "subs.srt"}`
+    must keep working exactly as it did. Subclassing Action directly keeps the schema a plain
+    string while the CLI collects every occurrence, so repeating the flag is purely additive.
+    """
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        current = getattr(namespace, self.dest, None)
+        if not isinstance(current, list):
+            current = [] if current is None else [current]
+        current.append(values)
+        setattr(namespace, self.dest, current)
+
+
+# BCP-47-ish: a 2-3 letter primary subtag, optionally followed by script/region/variant subtags.
+LANG_TOKEN_RE = re.compile(r"^[a-z]{2,3}(-[A-Za-z0-9]{2,8})*$")
+
+# The name a player lists a track under, when the caller gives no --track-title. Data, not a
+# translation: a code that is not in the table gets the code itself, never an invented name.
+LANG_TITLES = {
+    "en": "English", "es": "Espanol", "pt": "Portugues", "fr": "Francais", "de": "Deutsch",
+    "it": "Italiano", "nl": "Nederlands", "pl": "Polski", "ru": "\u0420\u0443\u0441\u0441\u043a\u0438\u0439",
+    "ja": "\u65e5\u672c\u8a9e", "zh": "\u4e2d\u6587", "ko": "\ud55c\uad6d\uc5b4",
+    "ar": "\u0627\u0644\u0639\u0631\u0628\u064a\u0629", "he": "\u05e2\u05d1\u05e8\u05d9\u05ea",
+    "hi": "\u0939\u093f\u0928\u094d\u0926\u0940", "th": "\u0e44\u0e17\u0e22",
+    "tr": "Turkce", "id": "Bahasa Indonesia", "vi": "Tieng Viet", "sv": "Svenska",
+    "da": "Dansk", "no": "Norsk", "fi": "Suomi", "cs": "Cestina", "uk": "\u0423\u043a\u0440\u0430\u0457\u043d\u0441\u044c\u043a\u0430",
+}
+
+# MP4/MOV store the language in an ISO-639-2/T box and silently drop anything that is not three
+# letters -- verified against ffmpeg 6.1: `-metadata:s:s:0 language=en` on an .mp4 writes NO
+# language tag at all, while `language=eng` writes one ffprobe reads back. Matroska stores the
+# code verbatim, so `en` survives there. Only the codes this table knows are converted; an
+# unknown one is passed through with a note rather than guessed at.
+ISO639_1_TO_2 = {
+    "en": "eng", "es": "spa", "pt": "por", "fr": "fra", "de": "deu", "it": "ita", "nl": "nld",
+    "pl": "pol", "ru": "rus", "ja": "jpn", "zh": "zho", "ko": "kor", "ar": "ara", "he": "heb",
+    "hi": "hin", "th": "tha", "tr": "tur", "id": "ind", "vi": "vie", "sv": "swe", "da": "dan",
+    "no": "nor", "fi": "fin", "cs": "ces", "uk": "ukr", "el": "ell", "hu": "hun", "ro": "ron",
+    "bg": "bul", "ca": "cat", "fa": "fas", "ta": "tam", "bn": "ben", "ms": "msa", "fil": "fil",
+}
+
+
+def split_srt_lang(token: str) -> Tuple[str, Optional[str]]:
+    """`file.srt:ja` -> ("file.srt", "ja"); anything else -> (token, None).
+
+    The split is on the LAST colon and only when the suffix is BCP-47-shaped AND the whole token
+    is not itself a readable file -- so `C:\\subs\\en.srt` (a Windows path) and a file genuinely
+    named `a:b.srt` are never mangled.
+    """
+    token = str(token)
+    if ":" not in token or os.path.exists(token):
+        return token, None
+    head, _, tail = token.rpartition(":")
+    if head and LANG_TOKEN_RE.match(tail):
+        return head, tail
+    # A tail that is clearly meant as a language code but is not one is a language error, not a
+    # file called `en.srt:zzzz`: only say "file not found" when the whole token could be a path.
+    if head and tail and not os.path.exists(token) and os.path.exists(head) \
+            and re.match(r"^[A-Za-z][A-Za-z0-9-]*$", tail):
+        die(f"--srt {token}: '{tail}' is not a language code (two or three letters, optionally "
+            "with a region, e.g. en, ja, pt-BR)", kind="input")
+    return token, None
+
+
+def container_language(code: str, output: str) -> str:
+    """The spelling of `code` this container actually stores (see ISO639_1_TO_2)."""
+    ext = Path(output).suffix.lower()
+    if ext not in (".mp4", ".m4v", ".mov"):
+        return code
+    primary = code.split("-")[0].lower()
+    return ISO639_1_TO_2.get(primary, code)
+
+
+def track_title_for(code: Optional[str], given: Optional[str]) -> Optional[str]:
+    if given:
+        return given
+    if not code:
+        return None
+    return LANG_TITLES.get(code.split("-")[0].lower(), code)
+
+
 def mux_subtitle_codec(output: str) -> str:
     ext = Path(output).suffix.lower()
     if ext in (".mp4", ".m4v", ".mov"):
@@ -905,13 +830,26 @@ def main() -> int:
                           "audio_streams) -- matters on a multi-track input (dubbed languages, M&E stems); default 0, "
                           "the first track, same as leaving it unset always did")
     src = ap.add_argument_group("subtitle source")
-    src.add_argument("--srt", help="SRT file to burn")
+    src.add_argument("--srt", action=AppendPath, metavar="FILE[:LANG]",
+                     help="SRT file to burn, or (with --mode mux) to add as a soft subtitle track. Repeat it once "
+                          "per language to build a multi-track deliverable, each with an optional `:lang` suffix: "
+                          "`--srt en.srt:en --srt ja.srt:ja`. A single --srt with no suffix takes --language, as "
+                          "it always did. NOTE: .mp4/.mov hold several mov_text tracks but many players show only "
+                          "the first, and the format needs ISO-639-2 codes (`eng`, not `en`) -- this tool converts "
+                          "them; .mkv is the honest multi-track container and stores the code you give verbatim")
     src.add_argument("--ass", help="ASS file to burn (styles inside the file are used)")
     src.add_argument("--text", help="plain text cue file to convert into SRT (see format above)")
     src.add_argument("--transcribe", action="store_true", help="generate the SRT from the audio with a local speech-to-text engine if one is installed (whisper-cli / whisper / faster-whisper); never required")
     src.add_argument("--language", "--lang", help="language code (e.g. en, ja, zh, ko): the language for --transcribe (default auto), "
                                                   "the tag on the subtitle stream with --mode mux, and the hint that says whether Han-only "
                                                   "text is Chinese, Japanese or Korean when a font is picked by script")
+    src.add_argument("--track-title", action=AppendPath, metavar="TITLE",
+                     help="--mode mux: the name a player lists a track under, repeated in the same order as --srt "
+                          "(default: the language's display name from a frozen table, else the code itself -- the "
+                          "table is data, never a guessed or translated name)")
+    src.add_argument("--default-track", metavar="LANG",
+                     help="--mode mux: mark this language's track `default` so a player selects it by itself "
+                          "(default: none, so no player burns in a language the viewer did not ask for)")
     src.add_argument("--offset", default="0", help="shift every cue by TIME (seconds, mm:ss, hh:mm:ss.ms or "
                                                     "hh:mm:ss:ff; a leading - shifts earlier); works for --text, --srt and --ass")
     src.add_argument("--model", default="base", help="whisper model name/path for --transcribe (default base)")
@@ -953,6 +891,13 @@ def main() -> int:
                      help="most emoji overlays one run may build (default 60)")
     sty.add_argument("--max-lines", type=int, default=2, help="most lines one cue may occupy; a longer cue is split into consecutive cues (default 2)")
     sty.add_argument("--min-duration", type=float, default=1.0, help="shortest time a cue stays on screen in seconds, never past the next cue (default 1.0)")
+    sty.add_argument("--wrap", choices=list(WRAP_MODES), default="phrase",
+                     help="how a cue too wide for the safe area is broken into lines: 'phrase' (default, 1.16) never "
+                          "breaks inside a word or on the wrong side of a hyphen, never leaves a lone digit, kana or "
+                          "punctuation on a line, prefers Japanese sentence ends and particles over a mid-word break, "
+                          "and never ends a line on an article or preposition; 'measured' is 1.15's width-only wrap, "
+                          "kept so an older split can be reproduced. Neither ever changes the number of lines, "
+                          "rewrites the text or shortens a cue")
     anim = ap.add_argument_group("animation (generates ASS; needs --text or --srt input)")
     anim.add_argument("--animate", choices=["none", "fade", "pop", "slide"], default=None, help="per-cue entrance animation (default none, or brand caption.animate)")
     anim.add_argument("--karaoke", action="store_true", help="word-by-word highlight (fills from --color to --highlight-color across each cue)")
@@ -1039,16 +984,46 @@ def main() -> int:
         if meta["video"].get("rotation") in (90, -90, 270, -270):
             play_w, play_h = play_h, play_w
 
+    caption_stats: dict = {"shifted": 0, "wrapped": 0, "split": 0, "extended": 0, "dropped": 0,
+                           "rebalanced": 0, "wrap": args.wrap, "phrase_breaks": 0}
+
     def lay_out(cue_list):
         """Wrap to the safe area, split past --max-lines, lengthen to --min-duration, shift by
         --offset -- the one place every cue source goes through, so an SRT, a cue file and a
         transcript all come out equally readable."""
         out, stats = layout_cues(cue_list, max_em=max_line_em(args, play_w, play_h),
                                  max_lines=args.max_lines, min_duration=args.min_duration,
-                                 offset=args.offset)
+                                 offset=args.offset, wrap=args.wrap, lang=args.language)
         report_layout(stats)
-        return out, any(stats.values())
+        caption_stats.clear()
+        caption_stats.update(stats)
+        return out, any(v for k, v in stats.items() if k != "wrap")
 
+    # --srt is repeatable since 1.16 (one per language, each with an optional `:lang` suffix).
+    # Every path below that burns, adjusts or transcribes works on the FIRST one, which is what
+    # `--srt x.srt` has always meant; the extra tracks only exist for --mode mux.
+    srt_tracks: List[Tuple[str, Optional[str]]] = []
+    for token in (args.srt or []):
+        path_part, lang_part = split_srt_lang(token)
+        srt_tracks.append((path_part, lang_part))
+    if len(srt_tracks) == 1 and srt_tracks[0][1] is None and args.language:
+        srt_tracks[0] = (srt_tracks[0][0], args.language)
+    if srt_tracks and args.mode != "mux" and len(srt_tracks) > 1:
+        die("burning renders pixels; only one language can be in the picture -- burn one and mux "
+            "the rest (caption.py OUT --mode mux --srt en.srt:en --srt ja.srt:ja)", kind="input")
+    seen_langs = [lang for _p, lang in srt_tracks if lang]
+    for lang in seen_langs:
+        if not LANG_TOKEN_RE.match(lang):
+            die(f"--srt: '{lang}' is not a language code (two or three letters, optionally with a "
+                "region, e.g. en, ja, pt-BR)", kind="input")
+    if len(set(seen_langs)) != len(seen_langs):
+        dup = sorted({l for l in seen_langs if seen_langs.count(l) > 1})
+        die(f"--srt: two tracks tagged '{', '.join(dup)}' -- a player cannot tell them apart; give "
+            "each track its own code (and --track-title to name them)", kind="input")
+    if args.track_title and len(args.track_title) > max(1, len(srt_tracks)):
+        die(f"--track-title given {len(args.track_title)} times for {len(srt_tracks)} --srt file(s)",
+            kind="input")
+    args.srt = srt_tracks[0][0] if srt_tracks else None
     srt_path = args.srt
     if args.transcribe:
         if not args.input:
@@ -1139,26 +1114,102 @@ def main() -> int:
         codec = mux_subtitle_codec(output)
         # Keep any subtitle track(s) the input already has (e.g. chaining --mode mux once per
         # language to build a multi-language set) -- copied byte-identical, distinct from the
-        # newly-added SRT's own codec below.
+        # newly-added SRTs' own codec below.
         existing_subs = meta.get("subtitle_streams") or 0
+        # the first entry's path is srt_path, which --offset/--max-lines may have repointed at an
+        # adjusted copy; the rest are taken as written
+        added = [(srt_path, srt_tracks[0][1] if srt_tracks else args.language)] + \
+                [(p, lang) for p, lang in srt_tracks[1:]]
+        for path, _lang in added[1:]:
+            if not os.path.exists(path) and not STATE.dry_run:
+                die(f"SRT file not found: {path}")
+        titles = list(args.track_title or [])
+        mp4_family = Path(output).suffix.lower() in (".mp4", ".m4v", ".mov")
+        dropped_titles: List[str] = []
+        notes = list(side_notes)
         maps = ["-map", "0:v:0"]
-        cmd = ffmpeg_base() + ["-i", args.input, "-i", srt_path]
+        cmd = ffmpeg_base() + ["-i", args.input]
+        for path, _lang in added:
+            cmd += ["-i", path]
         if meta.get("audio"):
             maps += ["-map", f"0:a:{args.audio_stream}"]
         if existing_subs:
             maps += ["-map", "0:s?"]
-        maps += ["-map", "1:0"]
+        for n in range(len(added)):
+            maps += ["-map", f"{n + 1}:0"]
         cmd += maps + ["-c:v", "copy"] + (["-c:a", "copy"] if meta.get("audio") else [])
         for i in range(existing_subs):
             cmd += [f"-c:s:{i}", "copy"]
-        cmd += [f"-c:s:{existing_subs}", codec]
-        if args.language:
-            cmd += [f"-metadata:s:s:{existing_subs}", f"language={args.language}"]
+        tracks: List[Dict[str, Any]] = []
+        for i in range(existing_subs):
+            kept = (meta.get("subtitle_stream_details") or [])
+            detail = kept[i] if i < len(kept) else {}
+            tracks.append({"index": i, "file": None, "language": detail.get("language"),
+                           "title": detail.get("title"), "codec": detail.get("codec"),
+                           "default": False, "cues": None, "kept_from_input": True})
+        for n, (path, lang) in enumerate(added):
+            idx = existing_subs + n
+            cmd += [f"-c:s:{idx}", codec]
+            stored = container_language(lang, output) if lang else None
+            if stored:
+                cmd += [f"-metadata:s:s:{idx}", f"language={stored}"]
+            title = track_title_for(lang, titles[n] if n < len(titles) else None)
+            # `-metadata:s:s:N title=` is written for Matroska and silently dropped by the MPEG-4
+            # muxer (verified on ffmpeg 6.1: ffprobe reads no title back), so an MP4 track is
+            # reported with `title: null` rather than a name the file does not carry.
+            if title and not mp4_family:
+                cmd += [f"-metadata:s:s:{idx}", f"title={title}"]
+            elif title:
+                dropped_titles.append(title)
+                title = None
+            is_default = bool(args.default_track and lang
+                              and lang.lower() == args.default_track.lower())
+            # ALWAYS stated, never only when it is "default": given two or more new subtitle
+            # streams and nothing said, ffmpeg flags the first one `default` by itself -- which
+            # is the opposite of what --default-track promises and made tracks[].default
+            # disagree with the file it describes. An explicit 0 suppresses that.
+            cmd += [f"-disposition:s:{idx}", "default" if is_default else "0"]
+            cues_n = None
+            if os.path.exists(path):
+                try:
+                    cues_n = len(parse_srt(path))
+                except SystemExit:
+                    cues_n = None
+            tracks.append({"index": idx, "file": path, "language": stored, "title": title,
+                           "codec": codec, "default": is_default, "cues": cues_n,
+                           "kept_from_input": False})
+        if args.default_track and not any(t["default"] for t in tracks):
+            die(f"--default-track {args.default_track}: no --srt was tagged with that language",
+                kind="input")
+        # MPEG-4 has no way to say "no default subtitle track": the muxer sets the track-header
+        # ENABLED flag on the first subtitle track whatever `-disposition:s:N 0` asks for
+        # (verified on ffmpeg 6.1; `-disposition:s:N default` does move it to another track).
+        # Matroska honours the explicit 0. Report what the file carries, not what was asked.
+        if mp4_family and tracks and not any(t["default"] for t in tracks):
+            tracks[0]["default"] = True
+            notes.append("an MPEG-4 container always enables its first subtitle track, so "
+                         f"{tracks[0]['language'] or 'track 0'} is marked default even though none "
+                         "was asked for; .mkv is the container that can leave every track off")
         cmd += [output]
+        total = existing_subs + len(added)
+        if total > 2 and mp4_family:
+            notes.append(f"{total} subtitle tracks in an MPEG-4 container: the tracks are all there, "
+                         "but many players only ever show the first -- write to .mkv for a "
+                         "deliverable a viewer can actually switch")
+        if dropped_titles:
+            notes.append("an MPEG-4 container has no per-track title this tool can write back "
+                         f"({', '.join(dropped_titles)} would be dropped), so the tracks are "
+                         "reported with no title; .mkv keeps the names")
+        if mp4_family and any(
+                t["language"] and len(t["language"]) != 3 for t in tracks if not t["kept_from_input"]):
+            notes.append("MPEG-4 stores the language as a three-letter ISO-639-2 code and drops "
+                         "anything else; a code this tool has no conversion for was passed through "
+                         "as given and may not survive")
         run(cmd)
         result = probe(output, role="output")
-        info(f"wrote {output} ({fmt_secs(result.get('duration'))}, mux, subtitle codec {codec})")
-        emit(output)
+        info(f"wrote {output} ({fmt_secs(result.get('duration'))}, mux, {len(added)} "
+             f"subtitle track(s) added, codec {codec})")
+        emit(output, tracks=tracks, subtitle_tracks=total, **({"notes": notes} if notes else {}))
         return 0
 
     # A font that covers the text, before anything is rendered: non-Latin cues in a Latin-only
@@ -1269,6 +1320,7 @@ def main() -> int:
     result = probe(output, role="output")
     info(f"wrote {output} ({fmt_secs(result.get('duration'))})")
     extra = {"notes": side_notes} if side_notes else {}
+    extra["caption"] = dict(caption_stats)
     if emoji_plan:
         notes = list(extra.get("notes") or [])
         if emoji_plan["mode"] == "mono":

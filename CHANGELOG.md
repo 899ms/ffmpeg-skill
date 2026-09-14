@@ -4,7 +4,100 @@
 
 ## Unreleased
 
-(nothing yet)
+### Added
+
+- **Audiogram: `waveform.py --image` and `render.py --template audiogram`.** The visualisation
+  over a still plate, which is what turns a podcast episode into something postable.
+  `--image PATH` (a local file), `--image-fit cover|contain|blur`, `--position
+  bottom|centre|top|strip`, `--vis-height FRAC`, `--opacity`, `--platform NAME` (the frame from
+  the delivery table; a destination with no frame is refused), `--title TEXT` (drawn through
+  `graphics.py`) and `--srt`/`--text` (burnt by `caption.py` afterwards, so neither code path is
+  re-implemented). Result key `audiogram`. Nothing is fetched and no cover art is ever invented:
+  give an image or a colour. **No new tool — the tool count stays 42**; `docs/design-decisions.md`
+  records why an `audiogram.py` would have been a second spelling of `waveform.py` and, under the
+  1.x guarantee, permanent surface.
+- **`metadata.py --auto-chapters`: chapter markers proposed from measured structure.** Pauses
+  (silencedetect) and scene changes (scdet) become candidates; a scene cut within 1 s of a
+  silence end merges into one `silence+scene` marker. `--min-chapter` (default 60),
+  `--max-chapters`, `--from silence|scenes|both`, `--silence-threshold`/`--silence-min`,
+  `--scene-threshold`, `--chapters-out FILE` (this tool's own `--chapters` format, so the titles
+  can be edited and fed back) and `--description-out FILE` (the YouTube `00:00 Chapter 1` block).
+  Result key `auto_chapters`, with each marker's evidence. **Every title is `Chapter N` and the
+  result says `"titles": "placeholder"`** — the skill proposes where a chapter starts, it cannot
+  know what is in one; naming them is the caller's job. Output is still `-c copy`; two detectors
+  mean two decodes, which `--help` and `notes` both say.
+- **Several language-tagged subtitle tracks in one `caption.py --mode mux`.** `--srt` is
+  repeatable and each file may carry a `:lang` suffix (`--srt en.srt:en --srt ja.srt:ja`). The
+  suffix splits on the last colon and only when the tail is a BCP-47-shaped code and the whole
+  token is not itself a file, so `C:\subs\en.srt` and a file named `a:b.srt` survive.
+  `--track-title` (a frozen display-name table by default — data, never a translation) and
+  `--default-track LANG`. Result keys `tracks` and `subtitle_tracks`. Empirically (ffmpeg 6.1),
+  `.mp4`/`.mov` hold several `mov_text` tracks but drop a two-letter language code without a
+  word, so the code is converted to ISO-639-2 (`en` → `eng`); Matroska stores what it is given,
+  and past two tracks in an MPEG-4 container the result recommends `.mkv` in `notes`. The skill
+  never translates and never generates a second language.
+- **`check.py`: an informational `subtitles` row on every platform.** `PASS` when every soft
+  subtitle stream carries a language tag, `WARN` when one does not or when there are none. Like
+  the podcast `channels`/`chapters` rows it is never counted in `failed`.
+
+### Fixed
+
+- **The audiogram ignored `--fps` / `--platform`.** A looped still is fed to ffmpeg at 25 fps
+  unless told otherwise, and `overlay` takes its rate from the first input, so
+  `--platform tiktok` announced 30 fps and wrote a 25 fps file (the colour-plate path was never
+  affected: `color=` carries its own `r=`). The still now gets `-framerate`, and the frame rate
+  joined the frame size and duration in what `audiogram.verified` actually checks.
+- **`--mode mux` marked a track `default` that nobody asked for.** With two or more new subtitle
+  streams and no `--default-track`, ffmpeg flags the first one itself — the opposite of what the
+  flag promises, and `tracks[].default` then described a file that did not exist. Every
+  disposition is stated explicitly now (`default` for the chosen track, `0` for the rest).
+  MPEG-4 cannot express "no default subtitle track" at all — it always enables its first one —
+  so there the track is *reported* `default: true` with a note, because the result document
+  describes the file, not the request.
+- **`audiogram.verified` was `true` under `--dry-run`**, where nothing had been rendered to
+  verify, while the common top-level `verified` said `false` for the same run.
+- **`--image` that ffmpeg cannot decode** is refused with `kind: input` naming the file, before
+  any encode starts, instead of surfacing as a raw ffmpeg failure.
+- **A malformed `:lang` suffix** (`--srt en.srt:zzzz`) is reported as a bad language code naming
+  the token, not as a missing file called `en.srt:zzzz`.
+- **`から`, `まで` and `より` are matched as whole words.** They had been left in the
+  *character* table of Japanese particles, which made `か`, `ら`, `ま`, `で`, `よ` and `り`
+  one-character particles of their own — none of them is — so a break before `か` was forbidden
+  and a break after it preferred.
+- **MPEG-4 subtitle track titles are no longer claimed.** `-metadata:s:s:N title=` is dropped by
+  the MPEG-4 muxer, so `tracks[].title` reported a name the file did not carry; it is `null`
+  there now, with a note saying `.mkv` keeps the names.
+- `metadata.py --auto-chapters`' "no chapters found" hint no longer suggests the value already
+  in use (`--min-chapter 1` was answered with "try `--min-chapter 1`").
+- `graphics.py --template sticker` wraps its label to the chip's own width rather than the
+  frame's, so a long `--text` cannot overflow the plate it is drawn on.
+
+### Changed
+
+- **`caption.py` and `graphics.py` wrap phrase-aware by default (`--wrap measured` restores
+  1.15.1).** Four rules, all penalties over break positions that already fit, so no line is
+  widened and the line count never changes: never inside a word or on the wrong side of a hyphen;
+  no line that is a lone digit, one or two punctuation characters or a single kana, checked at
+  every boundary rather than only the last; Japanese/Chinese breaks preferred after `。、！？」』）`
+  and after a particle — a particle is enclitic, so kinsoku keeps it with the word before it and a
+  break *before* one is forbidden — discouraged between a kanji stem and its okurigana and
+  forbidden before a small kana; and an article or preposition kept with the phrase it governs, by
+  preferring the break before it and penalising the break after it. **The `rebalanced` count in
+  the `cues:` line can differ for an unchanged input**, and a cue whose break moves is the point
+  of the release — the text itself is never rewritten, shortened or translated. graphics.py's hook
+  card, meme lines and sticker chip are now wrapped to the frame's safe width instead of running
+  off the edge; a label that already fits is untouched.
+  Eval 16's two open cues come out whole: `dl1` breaks as `A third line / the tool times for me`
+  (1.15: `A third line the / tool times for me`) and `dl3` as `自動でタイミングが / 決まる行`
+  (1.15: `自動でタイミングが決ま / る行`). `--wrap measured` reproduces the old splits.
+- `layout_cues` wraps each cue once instead of three times. The greedy fill is identical for
+  every mode, so `wrap_variants()` does it once and repeats only the post-passes, which is what
+  `rebalanced` and `phrase_breaks` need to be counted against.
+- The caption breaker moved from `caption.py` into `_common/text.py`, and the two structure
+  detectors (`silence.detect`, `scenes.detect_scenes`) into `_common/probe.py`, so
+  `metadata.py --auto-chapters` measures without any tool in `scripts/` importing a sibling tool.
+  Both moves are byte-for-byte; `caption.wrap_text`, `silence.detect` and `scenes.detect_scenes`
+  still resolve where they always did.
 
 ## 1.15.1
 

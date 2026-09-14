@@ -4,6 +4,12 @@
 
 ## Unreleased
 
+(nothing yet)
+
+## 1.17.0
+
+_Automated release: version and notes generated from pull requests merged since 1.16.1._
+
 _1.17.0 — throughput, plus the caption-size half of the eval-17 finding. The release
 workflow turns this heading into the version number._
 
@@ -67,6 +73,7 @@ workflow turns this heading into the version number._
 - `render.py` left its auto-named work directory behind after a failed render: a function-local
   `import shutil` shadowed the module-level one and the `atexit` cleanup raised `NameError`.
   (Introduced by this release's own `--cache` work; 1.16.1 never had it.)
+- feat: 1.17.0 — throughput (caption size that fits the cue, beat-synced cuts, filler-word removal, batch --jobs, render --cache) (#235)
 
 ## 1.16.1
 

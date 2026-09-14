@@ -4,6 +4,12 @@
 
 ## Unreleased
 
+(nothing yet)
+
+## 1.16.0
+
+_Automated release: version and notes generated from pull requests merged since 1.15.1._
+
 ### Added
 
 - **Audiogram: `waveform.py --image` and `render.py --template audiogram`.** The visualisation
@@ -98,6 +104,7 @@
   `metadata.py --auto-chapters` measures without any tool in `scripts/` importing a sibling tool.
   Both moves are byte-for-byte; `caption.wrap_text`, `silence.detect` and `scenes.detect_scenes`
   still resolve where they always did.
+- feat: 1.16.0 — long-form delivery (audiogram, auto chapters, multi-language subtitle tracks, phrase-aware captions) (#231)
 
 ## 1.15.1
 

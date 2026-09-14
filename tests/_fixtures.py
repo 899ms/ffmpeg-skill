@@ -231,6 +231,43 @@ class MediaFixtures(unittest.TestCase):
                "-t", "6", "-c:v", "libx264", "-preset", "veryfast", "-crf", "24",
                "-pix_fmt", "yuv420p", "-c:a", "aac", small)
         return small
+    def _vertical(self):
+        """A 1080x1920 clip: the real TikTok/Reels geometry, where the default caption size is
+        wide enough that an ordinary sentence needs four lines (eval 17)."""
+        vert = OUT / "cap_vertical.mp4"
+        if not vert.exists():
+            sh("ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-f", "lavfi",
+               "-i", "testsrc2=size=1080x1920:rate=30", "-f", "lavfi", "-i", "sine=f=440",
+               "-t", "6", "-c:v", "libx264", "-preset", "ultrafast", "-crf", "30",
+               "-pix_fmt", "yuv420p", "-c:a", "aac", vert)
+        return vert
+
+    def _beats(self):
+        """A 12 s clip with a synthetic 120 BPM click over moving pictures: a 440 Hz tone gated
+        to a short pulse every 0.5 s. Built from ffmpeg's own sources, so it is the same click on
+        every machine and the measured tempo is a fact of the fixture, not of the CI runner."""
+        clip = OUT / "beats.mp4"
+        if not clip.exists():
+            # a 40 ms pulse at the top of every half second
+            click = "0.8*sin(2*PI*880*t)*lt(mod(t\\,0.5)\\,0.04)"
+            sh("ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+               "-f", "lavfi", "-i", f"aevalsrc='{click}':s=48000",
+               "-f", "lavfi", "-i", "testsrc2=size=320x180:rate=30",
+               "-t", "12", "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
+               "-c:a", "aac", clip)
+        return clip
+
+    def _silent_clip(self):
+        """12 s of near-silence over moving pictures: an audio stream with no pulse to measure."""
+        clip = OUT / "no_beats.mp4"
+        if not clip.exists():
+            sh("ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+               "-f", "lavfi", "-i", "anoisesrc=amplitude=0.002:r=48000",
+               "-f", "lavfi", "-i", "testsrc2=size=320x180:rate=30",
+               "-t", "12", "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
+               "-c:a", "aac", clip)
+        return clip
+
     def _gappy(self):
         """A 12 s clip whose audio is speech-and-pause: tone for 2 s, silence for 2 s, six times
         over. The structure detectors (silence.py, metadata.py --auto-chapters) have something

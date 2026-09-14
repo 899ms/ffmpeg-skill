@@ -4,8 +4,11 @@
     python3 tests/test_editing.py       # this group alone
     python3 tests/test_all.py            # every group
 """
+import os
+import platform
 import json
 import re
+import shutil
 import subprocess
 import sys
 import unittest
@@ -1035,6 +1038,467 @@ class EditingTests(MediaFixtures):
         self.assertEqual(doc["error"]["kind"], "input")
         self.assertTrue(doc["error"]["message"])
         self.assertNotIn("summary", doc)
+
+    # --------------------------------------------------- 1.17: beat-snapped cuts (cut.py --snap)
+    def test_cut_snap_beats_moves_the_points_to_measured_beats(self):
+        out = OUT / "snap_cut.mp4"
+        data = json.loads(script("cut.py", self._beats(), "--start", "2.03", "--end", "6.01",
+                                 "--snap", "beats", "-o", out, "--json").stdout)
+        snap = data["snap"]
+        self.assertEqual(snap["mode"], "beats")
+        self.assertEqual(snap["source"], "measured")
+        self.assertEqual(snap["snapped"], 2)
+        self.assertEqual(len(snap["moved"]), 2)       # never more points than were asked for
+        self.assertAlmostEqual(snap["tempo_bpm"], 120.0, delta=2.0)
+        for row in snap["moved"]:
+            self.assertLessEqual(abs(row["delta"]), snap["tolerance"])
+        # the cut lands on a whole number of beats
+        span = snap["moved"][1]["to"] - snap["moved"][0]["to"]
+        beats = span / (60.0 / snap["tempo_bpm"])
+        self.assertLess(abs(beats - round(beats)), 0.05)
+        # container duration, not the cut: AAC packs audio in 1024-sample frames (21 ms at
+        # 48 kHz) and ffmpeg 5.1 pads the last one, so allow a few frames of slack
+        self.assertLess(abs(data["output_duration"] - span), 0.1)
+
+    def test_cut_snap_beats_moves_only_onto_onset_supported_points(self):
+        """The grid is regular by construction, so it runs on through a passage with no music.
+        A cut asked for inside that passage is NOT moved: the only points this tool may snap to
+        are the ones a measured onset marks."""
+        clip = OUT / "beats_half.mp4"
+        if not clip.exists():
+            # 12 s: a 120 BPM click for the first 5 s, then silence
+            click = "0.8*sin(2*PI*880*t)*lt(mod(t\\,0.5)\\,0.04)*lt(t\\,5)"
+            sh("ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+               "-f", "lavfi", "-i", f"aevalsrc='{click}':s=48000",
+               "-f", "lavfi", "-i", "testsrc2=size=320x180:rate=30",
+               "-t", "12", "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
+               "-c:a", "aac", clip)
+        data = json.loads(script("cut.py", clip, "--start", "2.03", "--end", "9.01",
+                                 "--snap", "beats", "-o", OUT / "snap_half.mp4",
+                                 "--json").stdout)
+        snap = data["snap"]
+        self.assertEqual(snap["grid"], "supported")
+        self.assertLess(snap["grid_points"], 24)     # fewer than the full 12 s grid
+        # the in point sits in the music and moves; the out point sits in the silence and does not
+        self.assertTrue(snap["moved"][0]["snapped"])
+        self.assertFalse(snap["moved"][1]["snapped"])
+        self.assertEqual(snap["moved"][1]["to"], snap["moved"][1]["from"])
+        self.assertEqual(snap["snapped"], 1)
+
+    def test_cut_snap_beats_refuses_a_zero_confidence_floor(self):
+        r = script("cut.py", self._beats(), "--start", "2.03", "--end", "6.01", "--snap", "beats",
+                   "--min-confidence", "0", "-o", OUT / "snap_zero.mp4", "--json",
+                   expect_fail=True)
+        err = json.loads(r.stdout)["error"]
+        self.assertEqual(err["kind"], "input")
+        self.assertIn("--min-confidence", err["message"])
+
+    def test_cut_snap_source_without_a_supported_list_is_refused(self):
+        """A document from an older build lists beats but cannot say which of them an onset
+        supports. An unknown subset is not an empty one -- and it is not a measurement either."""
+        doc = OUT / "snap_old.json"
+        doc.write_text(json.dumps({"beats": [1.0, 2.0, 3.0],
+                                   "beat_grid": {"tempo_bpm": 120.0, "confidence": 0.9}}),
+                       encoding="utf-8")
+        r = script("cut.py", self._beats(), "--start", "2.03", "--end", "6.01", "--snap", "beats",
+                   "--snap-source", doc, "-o", OUT / "snap_old.mp4", "--json", expect_fail=True)
+        self.assertEqual(json.loads(r.stdout)["error"]["kind"], "input")
+
+    def test_cut_snap_source_with_no_tempo_is_refused(self):
+        doc = OUT / "snap_notempo.json"
+        doc.write_text(json.dumps({"beats": [1.0, 2.0],
+                                   "beat_grid": {"tempo_bpm": None, "confidence": 0.9,
+                                                 "supported_beats": [1.0, 2.0]}}),
+                       encoding="utf-8")
+        r = script("cut.py", self._beats(), "--start", "2.03", "--end", "6.01", "--snap", "beats",
+                   "--snap-source", doc, "-o", OUT / "snap_nt.mp4", "--json", expect_fail=True)
+        self.assertEqual(json.loads(r.stdout)["error"]["kind"], "input")
+
+    def test_cut_snap_beats_refuses_a_whole_file_copy_spelled_as_a_time(self):
+        """`--start 0:00` is the same whole-file copy as no --start at all; a string comparison
+        against "0" let it through and the run then shortened the file at the far end."""
+        for start in ("0:00", "0.0", "00:00:00"):
+            with self.subTest(start=start):
+                r = script("cut.py", self._beats(), "--start", start, "--snap", "beats",
+                           "-o", OUT / "snap_wholetime.mp4", "--json", expect_fail=True)
+                err = json.loads(r.stdout)["error"]
+                self.assertEqual(err["kind"], "input")
+                self.assertIn("--snap", err["message"])
+
+    def test_cut_snap_beats_refuses_a_grid_it_cannot_measure(self):
+        """Never fabricate: without a measurable pulse the points are not moved to invented
+        times -- the run refuses and names --snap none."""
+        out = OUT / "snap_refuse.mp4"
+        if out.exists():
+            out.unlink()
+        r = script("cut.py", self._silent_clip(), "--start", "2.03", "--end", "6.01",
+                   "--snap", "beats", "-o", out, "--json", expect_fail=True)
+        err = json.loads(r.stdout)["error"]
+        self.assertEqual(err["kind"], "input")
+        self.assertIn("--snap none", err["message"])
+        self.assertIn("confidence", err["message"])
+        self.assertFalse(out.exists())
+
+    def test_cut_snap_beats_refuses_without_audio(self):
+        mute = OUT / "snap_mute.mp4"
+        sh("ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-i", self._beats(),
+           "-an", "-c:v", "copy", mute)
+        r = script("cut.py", mute, "--start", "2.03", "--end", "6.01", "--snap", "beats",
+                   "-o", OUT / "snap_mute_cut.mp4", "--json", expect_fail=True)
+        err = json.loads(r.stdout)["error"]
+        self.assertEqual(err["kind"], "input")
+        self.assertIn("--snap none", err["message"])
+
+    def test_cut_snap_beats_refuses_a_whole_file_copy(self):
+        r = script("cut.py", self._beats(), "--snap", "beats",
+                   "-o", OUT / "snap_whole.mp4", "--json", expect_fail=True)
+        err = json.loads(r.stdout)["error"]
+        self.assertEqual(err["kind"], "input")
+        self.assertIn("--snap", err["message"])
+
+    def test_cut_snap_source_takes_the_grid_from_a_scenes_document(self):
+        doc = OUT / "snap_grid.json"
+        doc.write_text(script("scenes.py", self._beats(), "--beats", "--json").stdout,
+                       encoding="utf-8")
+        data = json.loads(script("cut.py", self._beats(), "--start", "2.03", "--end", "6.01",
+                                 "--snap", "beats", "--snap-source", doc,
+                                 "-o", OUT / "snap_src.mp4", "--json").stdout)
+        self.assertEqual(data["snap"]["source"], str(doc))
+        self.assertEqual(data["snap"]["snapped"], 2)
+
+    def test_cut_without_snap_reports_no_snap_key(self):
+        data = json.loads(script("cut.py", self._beats(), "--start", "2.03", "--end", "6.01",
+                                 "-o", OUT / "snap_off.mp4", "--json").stdout)
+        self.assertIsNone(data.get("snap"))
+
+    # ------------------------------------------------ 1.17: filler words (silence.py --filler)
+    def _words_json(self, name="words.json", lang="en", words=None):
+        path = OUT / name
+        words = words if words is not None else [
+            ("So", 0.2, 0.5), ("um", 0.6, 0.8), ("this", 1.0, 1.3), ("uh", 2.2, 2.45),
+            ("umbrella", 3.0, 3.6), ("erm", 4.1, 4.35), ("works", 5.0, 5.4)]
+        path.write_text(json.dumps({"language": lang, "segments": [
+            {"words": [{"word": w, "start": a, "end": b} for w, a, b in words]}]}),
+            encoding="utf-8")
+        return path
+
+    def test_filler_removes_only_the_timed_filler_words(self):
+        out = OUT / "filler_out.mp4"
+        data = json.loads(script("silence.py", self._gappy(), "--filler",
+                                 "--words", self._words_json(), "-o", out, "--json").stdout)
+        fil = data["filler"]
+        self.assertEqual(fil["removed_count"], 3)
+        self.assertEqual(fil["lang"], "en")
+        self.assertEqual(fil["list"], "builtin")
+        self.assertEqual(fil["word_timings"], 7)
+        self.assertEqual(sorted(fil["removed_words"]), ["erm", "uh", "um"])
+        self.assertIn("removed_seconds_total", data)
+        self.assertGreater(fil["removed_seconds"], 0)
+        # "umbrella" is not "um": whole tokens only
+        self.assertNotIn("umbrella", fil["removed_words"])
+        m = probe(str(out))
+        self.assertLess(m["duration"], data["input_duration"])
+
+    def _talk_with_a_gap(self):
+        """10 s: tone, 4 s of silence in the middle, tone. A filler word placed at 3.0 s sits
+        INSIDE that silence, which is where a mumbled "um" usually is."""
+        talk = OUT / "talk_gap.m4a"
+        if not talk.exists():
+            sh("ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-f", "lavfi",
+               "-i", "aevalsrc='0.5*sin(2*PI*440*t)*(lt(t\\,2)+gt(t\\,6))':s=48000",
+               "-t", "10", talk)
+        return talk
+
+    def test_filler_inside_a_silence_still_removes_the_silence(self):
+        """The regression: filler spans were merged only among themselves, so a span nested
+        inside a detected silence rewound keep_ranges' cursor and handed the silence back.
+        Adding --filler made the tool remove LESS than it did without it."""
+        talk = self._talk_with_a_gap()
+        words = OUT / "words_inside.json"
+        words.write_text(json.dumps({"language": "en", "segments": [
+            {"words": [{"word": "um", "start": 3.0, "end": 3.2}]}]}), encoding="utf-8")
+        plain = json.loads(script("silence.py", talk, "--list", "--json").stdout)
+        withf = json.loads(script("silence.py", talk, "--filler", "--filler-list",
+                                  "--words", words, "--json").stdout)
+        self.assertEqual(plain["silences"], withf["silences"])
+        # --filler can only ever remove at least as much as the same run without it
+        self.assertGreaterEqual(withf["removed_seconds_total"], plain["removed_seconds"] - 0.01)
+        self.assertGreater(withf["removed_seconds_total"], 3.0)
+
+    def test_removed_seconds_keeps_its_silence_only_meaning(self):
+        """A caller reading `removed_seconds` since 1.0 asked how much dead air went. --filler
+        must not quietly make it mean something else; `removed_seconds_total` is the new figure."""
+        talk = self._talk_with_a_gap()
+        words = OUT / "words_outside.json"
+        # a filler word in the SPEECH, well away from the silence, so the two figures differ
+        words.write_text(json.dumps({"language": "en", "segments": [
+            {"words": [{"word": "um", "start": 0.5, "end": 0.9}]}]}), encoding="utf-8")
+        plain = json.loads(script("silence.py", talk, "--list", "--json").stdout)
+        withf = json.loads(script("silence.py", talk, "--filler", "--filler-list",
+                                  "--words", words, "--json").stdout)
+        self.assertAlmostEqual(withf["removed_seconds"], plain["removed_seconds"], delta=0.01)
+        self.assertGreater(withf["removed_seconds_total"], withf["removed_seconds"])
+
+    def test_keep_ranges_is_monotone_with_a_nested_span(self):
+        """keep_ranges walks one cursor forward; a nested span used to rewind it."""
+        sys.path.insert(0, str(SCRIPTS))
+        import importlib
+        silence = importlib.import_module("silence")
+        nested = silence.keep_ranges(sorted([(1.0, 3.0), (1.5, 1.8)]), 10, 0.05, 0.2)
+        plain = silence.keep_ranges([(1.0, 3.0)], 10, 0.05, 0.2)
+        self.assertEqual(nested, plain)
+        self.assertEqual(silence.merge_spans([(1.0, 3.0), (1.5, 1.8), (4.0, 4.5), (4.5, 5.0)]),
+                         [(1.0, 3.0), (4.0, 5.0)])
+        # an unsorted input is sorted on the way in
+        self.assertEqual(silence.keep_ranges([(4.0, 5.0), (1.0, 2.0)], 10, 0.05, 0.2),
+                         silence.keep_ranges([(1.0, 2.0), (4.0, 5.0)], 10, 0.05, 0.2))
+
+    def test_filler_list_writes_nothing(self):
+        out = OUT / "filler_nothing.mp4"
+        if out.exists():
+            out.unlink()
+        data = json.loads(script("silence.py", self._gappy(), "--filler", "--filler-list",
+                                 "--words", self._words_json(), "-o", out, "--json").stdout)
+        self.assertEqual(data["filler"]["removed_count"], 3)
+        self.assertFalse(out.exists())
+
+    def test_filler_keep_and_extra_change_the_list(self):
+        kept = json.loads(script("silence.py", self._gappy(), "--filler", "--filler-list",
+                                 "--filler-keep", "um,uh", "--words", self._words_json(),
+                                 "--json").stdout)["filler"]
+        self.assertEqual(kept["removed_words"], ["erm"])
+        extra = json.loads(script("silence.py", self._gappy(), "--filler", "--filler-list",
+                                  "--filler-extra", "so", "--words", self._words_json(),
+                                  "--json").stdout)["filler"]
+        self.assertIn("so", extra["removed_words"])
+
+    def test_filler_warns_about_a_japanese_discourse_marker(self):
+        words = [("\u305d\u308c\u306f", 0.2, 0.5), ("\u306a\u3093\u304b", 0.6, 0.85), ("\u3044\u3044", 1.0, 1.3)]
+        data = json.loads(script("silence.py", self._gappy(), "--filler", "--filler-list",
+                                 "--words", self._words_json("words_ja.json", "ja", words),
+                                 "--json").stdout)
+        fil = data["filler"]
+        self.assertEqual(fil["lang"], "ja")
+        self.assertIn("\u306a\u3093\u304b", fil["removed_words"])
+        self.assertTrue(any("\u306a\u3093\u304b" in w for w in fil["warnings"]))
+
+    def test_filler_transcribe_uses_measured_word_timings(self):
+        """e2e with the engine bridge mocked: --transcribe must reach filler_spans with real
+        per-word start/end pairs. The bridge is mocked because the suite must pass on a machine
+        with no whisper at all -- which is what CI is."""
+        shim = OUT / "asr_shim"
+        shim.mkdir(exist_ok=True)
+        (shim / "sitecustomize.py").write_text(
+            "import sys, os\n"
+            "sys.path.insert(0, os.environ['FFSKILL_SCRIPTS'])\n"
+            "import _common.asr as asr, _common as c\n"
+            "def fake(video, language=None, model='base', audio_stream=0):\n"
+            "    return ([{'word': 'So', 'start': 0.2, 'end': 0.5},\n"
+            "             {'word': 'um', 'start': 0.6, 'end': 0.8},\n"
+            "             {'word': 'this', 'start': 1.0, 'end': 1.3},\n"
+            "             {'word': 'uh', 'start': 2.2, 'end': 2.45}], 'faster-whisper')\n"
+            "asr.transcribe_words = fake\n"
+            "c.transcribe_words = fake\n",
+            encoding="utf-8")
+        env = dict(os.environ, PYTHONPATH=str(shim), FFSKILL_SCRIPTS=str(SCRIPTS))
+        r = sh(sys.executable, SCRIPTS / "silence.py", self._gappy(), "--filler",
+               "--transcribe", "--filler-list", "--json", env=env)
+        fil = json.loads(r.stdout)["filler"]
+        self.assertEqual(fil["engine"], "faster-whisper")
+        self.assertEqual(fil["word_timings"], 4)
+        self.assertEqual(sorted(fil["removed_words"]), ["uh", "um"])
+        for span in fil["removed"]:
+            self.assertLess(span["start"], span["end"])
+
+    def test_filler_transcribe_refuses_when_the_engine_gives_no_word_timings(self):
+        """An engine that runs but whose build has no word timestamps must say exactly that and
+        name --words -- not report an empty removal as a success."""
+        shim = OUT / "asr_shim_empty"
+        shim.mkdir(exist_ok=True)
+        (shim / "sitecustomize.py").write_text(
+            "import sys, os\n"
+            "sys.path.insert(0, os.environ['FFSKILL_SCRIPTS'])\n"
+            "import _common.asr as asr, _common as c\n"
+            "def fake(video, language=None, model='base', audio_stream=0):\n"
+            "    return ([], 'whisper.cpp')\n"
+            "asr.transcribe_words = fake\n"
+            "c.transcribe_words = fake\n",
+            encoding="utf-8")
+        env = dict(os.environ, PYTHONPATH=str(shim), FFSKILL_SCRIPTS=str(SCRIPTS))
+        out = OUT / "filler_nowords.mp4"
+        if out.exists():
+            out.unlink()
+        r = sh(sys.executable, SCRIPTS / "silence.py", self._gappy(), "--filler",
+               "--transcribe", "-o", out, "--json", expect_fail=True, env=env)
+        err = json.loads(r.stdout)["error"]
+        self.assertEqual(err["kind"], "input")
+        self.assertIn("whisper.cpp", err["message"])
+        self.assertIn("--words", err["message"])
+        self.assertFalse(out.exists())
+
+    def test_filler_pad_must_not_be_negative(self):
+        """A negative pad turns each span inside out and filler_spans then drops them all, so the
+        run would report a successful removal of nothing."""
+        r = script("silence.py", self._gappy(), "--filler", "--filler-pad", "-0.5",
+                   "--words", self._words_json(), "-o", OUT / "filler_pad.mp4",
+                   "--json", expect_fail=True)
+        self.assertEqual(json.loads(r.stdout)["error"]["kind"], "input")
+
+    def test_filler_refuses_without_a_transcript(self):
+        out = OUT / "filler_refuse.mp4"
+        if out.exists():
+            out.unlink()
+        r = script("silence.py", self._gappy(), "--filler", "-o", out, "--json", expect_fail=True)
+        err = json.loads(r.stdout)["error"]
+        self.assertEqual(err["kind"], "input")
+        self.assertIn("--words", err["message"])
+        self.assertIn("--transcribe", err["message"])
+        self.assertFalse(out.exists())
+
+    def test_filler_refuses_a_segment_only_transcript(self):
+        doc = OUT / "segments_only.json"
+        doc.write_text(json.dumps({"language": "en", "segments": [
+            {"start": 0.0, "end": 2.0, "text": "So um this"}]}), encoding="utf-8")
+        r = script("silence.py", self._gappy(), "--filler", "--words", doc,
+                   "-o", OUT / "filler_seg.mp4", "--json", expect_fail=True)
+        err = json.loads(r.stdout)["error"]
+        self.assertEqual(err["kind"], "input")
+        self.assertIn("word timings", err["message"])
+
+    def test_filler_refuses_when_no_whisper_is_installed(self):
+        """The eval image has no engine; the refusal must name the three installs. PATH is
+        stripped so the test does not depend on whether this machine has one."""
+        try:
+            import faster_whisper  # noqa: F401
+            self.skipTest("faster-whisper is installed on this machine; the absent-engine path "
+                          "cannot be exercised without uninstalling it")
+        except ImportError:
+            pass
+        # A PATH with ffmpeg/ffprobe and nothing else: stripping PATH outright would make the
+        # run fail on ffprobe long before it reached the engine probe.
+        if platform.system() == "Windows":
+            # A symlink needs a privilege here, and a COPIED ffmpeg.exe cannot find its sibling
+            # DLLs -- so neither branch of the shim works on Windows, and pretending one does
+            # would make this a test that passes without exercising anything. The refusal it
+            # covers is platform-independent (it is a PATH/import probe in _common/asr.py), and
+            # the mocked-bridge tests above cover the same message on every OS.
+            self.skipTest("no way to build a PATH shim on Windows: a copied ffmpeg.exe loses "
+                          "its DLLs and a symlink needs a privilege")
+        shim = OUT / "no_whisper_path"
+        shim.mkdir(exist_ok=True)
+        for tool in ("ffmpeg", "ffprobe"):
+            real = shutil.which(tool)
+            if not real:
+                self.skipTest(f"{tool} not on PATH")
+            link = shim / Path(real).name
+            if link.exists():
+                continue
+            try:
+                os.symlink(real, link)
+            except (OSError, NotImplementedError, AttributeError):
+                self.skipTest("cannot symlink ffmpeg into a PATH shim on this machine")
+        env = dict(os.environ, PATH=str(shim))
+        out = OUT / "filler_nowhisper.mp4"
+        if out.exists():
+            out.unlink()
+        r = sh(sys.executable, SCRIPTS / "silence.py", self._gappy(), "--filler", "--transcribe",
+               "-o", out, "--json", expect_fail=True, env=env)
+        message = json.loads(r.stdout)["error"]["message"]
+        for engine in ("whisper.cpp", "faster-whisper", "openai-whisper"):
+            self.assertIn(engine, message)
+        self.assertFalse(out.exists())
+
+    def test_silence_without_filler_is_unchanged(self):
+        data = json.loads(script("silence.py", self._gappy(), "--list", "--json").stdout)
+        self.assertNotIn("filler", data)
+        self.assertNotIn("removed_seconds_total", data)
+
+
+class FillerSpansTests(unittest.TestCase):
+    """1.17: which words become removal spans, as pure arithmetic on measured timings."""
+
+    def setUp(self):
+        sys.path.insert(0, str(SCRIPTS))
+        import importlib
+        self.D = importlib.import_module("_common.decision")
+
+    def _w(self, *triples):
+        return [{"word": w, "start": a, "end": b} for w, a, b in triples]
+
+    def test_matches_whole_tokens_only(self):
+        spans = self.D.filler_spans(
+            self._w(("umbrella", 0.0, 0.4), ("Umm,", 1.0, 1.2), ("UM", 2.0, 2.15)),
+            self.D.FILLER_WORDS["en"] | {"umm"})
+        self.assertEqual([s["word"] for s in spans], ["umm", "um"])
+
+    def test_never_without_timings(self):
+        self.assertEqual(self.D.filler_spans([{"word": "um"}], {"um"}), [])
+        self.assertEqual(self.D.filler_spans([{"word": "um", "start": 2.0, "end": 1.0}], {"um"}), [])
+        self.assertEqual(self.D.filler_spans([{"word": "um", "start": None, "end": 1.0}], {"um"}), [])
+
+    def test_merges_adjacent_spans(self):
+        close = self.D.filler_spans(self._w(("um", 1.0, 1.1), ("uh", 1.13, 1.25)),
+                                    {"um", "uh"}, pad=0.0)
+        self.assertEqual(len(close), 1)
+        apart = self.D.filler_spans(self._w(("um", 1.0, 1.1), ("uh", 1.3, 1.45)),
+                                    {"um", "uh"}, pad=0.0)
+        self.assertEqual(len(apart), 2)
+
+    def test_rejects_a_long_held_word(self):
+        self.assertEqual(self.D.filler_spans(self._w(("uhhh", 1.0, 3.0)), {"uhhh"}), [])
+
+    def test_japanese_list(self):
+        ja = self.D.FILLER_WORDS["ja"]
+        spans = self.D.filler_spans(
+            self._w(("\u3048\u30fc\u3068", 1.0, 1.3), ("\u3042\u306e", 2.0, 2.2), ("\u3042\u306e\u3072\u3068", 3.0, 3.4)), ja)
+        self.assertEqual([s["word"] for s in spans], ["\u3048\u30fc\u3068", "\u3042\u306e"])
+
+    def test_like_is_not_a_default_filler_word(self):
+        """A discourse marker is a content word: cutting it cuts meaning, which is a judgement
+        this skill does not make. It is reachable with --filler-extra and documented."""
+        self.assertNotIn("like", self.D.FILLER_WORDS["en"])
+        self.assertNotIn("tipo", self.D.FILLER_WORDS["pt"])
+        self.assertIn("like", self.D.FILLER_DISCOURSE_MARKERS["en"])
+
+    def test_whisper_cpp_json_becomes_word_timings(self):
+        """whisper.cpp --output-json-full: transcription[].tokens[] with MILLISECOND offsets,
+        special tokens dropped, and a continuation token glued to the word before it."""
+        import importlib
+        asr = importlib.import_module("_common.asr")
+        doc = OUT / "wcpp.json"
+        doc.write_text(json.dumps({"transcription": [{"tokens": [
+            {"text": "[_BEG_]", "offsets": {"from": 0, "to": 0}},
+            {"text": " So", "offsets": {"from": 200, "to": 500}},
+            {"text": " un", "offsets": {"from": 600, "to": 700}},
+            {"text": "believable", "offsets": {"from": 700, "to": 1100}},
+            {"text": " um", "offsets": {"from": 1200, "to": 1400}},
+            {"text": " broken", "offsets": {}},
+        ]}]}), encoding="utf-8")
+        words = asr._words_from_whisper_cpp_json(str(doc))
+        self.assertEqual([w["word"] for w in words], ["So", "unbelievable", "um"])
+        self.assertAlmostEqual(words[0]["start"], 0.2, places=6)
+        self.assertAlmostEqual(words[1]["end"], 1.1, places=6)      # glued span ends at the tail
+        self.assertEqual(asr._words_from_whisper_cpp_json(str(OUT / "nope.json")), [])
+
+    def test_openai_whisper_json_becomes_word_timings(self):
+        import importlib
+        asr = importlib.import_module("_common.asr")
+        doc = OUT / "owhisper.json"
+        doc.write_text(json.dumps({"segments": [
+            {"words": [{"word": " So", "start": 0.2, "end": 0.5},
+                       {"word": " um", "start": 0.6, "end": 0.8},
+                       {"word": " bad", "start": None, "end": 1.0}]}]}), encoding="utf-8")
+        words = asr._words_from_openai_whisper_json(str(doc))
+        self.assertEqual([w["word"] for w in words], ["So", "um"])
+        self.assertAlmostEqual(words[1]["start"], 0.6, places=6)
+
+    def test_filler_spans_is_pure(self):
+        import unittest.mock
+        def boom(*a, **k):
+            raise AssertionError("filler_spans ran a subprocess")
+        with unittest.mock.patch.object(subprocess, "run", boom), \
+             unittest.mock.patch.object(subprocess, "Popen", boom):
+            self.assertEqual(len(self.D.filler_spans(self._w(("um", 1.0, 1.2)), {"um"})), 1)
 
 
 if __name__ == "__main__":

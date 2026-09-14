@@ -14,6 +14,7 @@ import shutil
 import subprocess
 import sys
 import unittest
+import unittest.mock
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -1667,6 +1668,149 @@ class PictureTests(MediaFixtures):
             self.assertEqual(proc.returncode, 0, f"{name}: {proc.stderr[-300:]}")
             self.assertIn("usage:", proc.stdout)
 
+    # ------------------------------------------- 1.17: the size is fitted before the cue splits
+    def _fit_cues(self):
+        cues = OUT / "cues_fit.txt"
+        cues.write_text("0:00-0:03 A third line the tool times for me\n"
+                        "0:03-0:06 Segunda l\u00ednea de subt\u00edtulos\n", encoding="utf-8")
+        return cues
+
+    def test_caption_fit_size_shrinks_instead_of_splitting_the_sentence(self):
+        """e2e: at the TikTok caption size these cues needed four lines and were split into
+        consecutive cues (eval 17). 1.17 drops the size until they fit instead."""
+        vert, cues = self._vertical(), self._fit_cues()
+        out = OUT / "cap_fit.mp4"
+        data = json.loads(script("caption.py", vert, "--text", cues, "--platform", "tiktok",
+                                 "--max-lines", "2", "--animate", "fade",
+                                 "--font", "DejaVu Sans", "--write-ass", OUT / "cap_fit.ass",
+                                 "-o", out, "--json").stdout)
+        cap = data["caption"]
+        self.assertEqual(cap["fit_size"], "auto")
+        self.assertEqual(cap["fit_scope"], "file")
+        self.assertLess(cap["size_used"], cap["size_requested"])
+        self.assertEqual(cap["size_floor"], 13)
+        self.assertGreaterEqual(cap["shrunk"], 1)
+        self.assertFalse(cap["fit_exhausted"])
+        self.assertEqual(cap["split"], 0)           # the whole point: nothing was split
+        m = probe(str(out))
+        self.assertEqual((m["video"]["width"], m["video"]["height"]), (1080, 1920))
+        # the ASS on disk carries the shrunk size, and each cue is one cue of two lines
+        ass = (OUT / "cap_fit.ass").read_text(encoding="utf-8-sig")
+        style = next(l for l in ass.splitlines() if l.startswith("Style:"))
+        self.assertEqual(int(style.split(",")[2]), round(cap["size_used"] * 1920 / 288))
+        dialogue = [l for l in ass.splitlines() if l.startswith("Dialogue:")]
+        self.assertEqual(len(dialogue), 2)
+        for line in dialogue:
+            self.assertEqual(line.count("\\N"), 1)
+
+    def test_caption_scope_cue_lays_each_cue_out_at_its_own_size(self):
+        """The regression: with scope=cue every cue was wrapped to the FILE's budget -- the
+        budget of the smallest size, which is the widest line in em -- and then drawn at its own
+        larger size, so lines ran off the side of the frame. Each cue is now laid out at the size
+        it is drawn at, and no rendered line exceeds the safe width."""
+        sys.path.insert(0, str(SCRIPTS))
+        import importlib
+        text_mod = importlib.import_module("_common.text")
+        vert = self._vertical()
+        cues = OUT / "cues_scope.txt"
+        cues.write_text("0:00-0:03 A third line the tool times for me\n"
+                        "0:03-0:05 Hi\n"
+                        "0:05-0:08 Una tercera l\u00ednea con tiempos autom\u00e1ticos\n",
+                        encoding="utf-8")
+        ass = OUT / "cap_scope.ass"
+        data = json.loads(script("caption.py", vert, "--text", cues, "--platform", "tiktok",
+                                 "--max-lines", "2", "--animate", "fade", "--font", "DejaVu Sans",
+                                 "--fit-size-scope", "cue", "--write-ass", ass,
+                                 "-o", OUT / "cap_scope.mp4", "--json").stdout)
+        cap = data["caption"]
+        self.assertEqual(cap["fit_scope"], "cue")
+        self.assertEqual(cap["split"], 0)
+
+        body = ass.read_text(encoding="utf-8-sig")
+        style_px = int(next(l for l in body.splitlines() if l.startswith("Style:")).split(",")[2])
+        dialogue = [l for l in body.splitlines() if l.startswith("Dialogue:")]
+        self.assertEqual(len(dialogue), 3)
+        # at least two different drawn sizes, which is the whole point of the flag
+        drawn = set()
+        safe_px = 1080 * text_mod.SAFE_WIDTH_FRACTION
+        for line in dialogue:
+            payload = line.split(",,0,0,0,,", 1)[1]
+            override = re.search(r"\{\\fs(\d+)\}", payload)
+            px = int(override.group(1)) if override else style_px
+            drawn.add(px)
+            body_text = re.sub(r"\{[^}]*\}", "", payload)
+            for rendered in body_text.split("\\N"):
+                width = text_mod.text_width_em(rendered) * px
+                self.assertLessEqual(width, safe_px,
+                                     f"{rendered!r} is {width:.0f}px at size {px}, safe {safe_px:.0f}px")
+        self.assertGreaterEqual(len(drawn), 2)
+
+    def test_caption_fit_size_off_is_byte_identical_to_1_16_1(self):
+        """The stability answer: one flag restores the old ASS byte for byte. The pinned file
+        was generated by 1.16.1's own caption.py (tests/fixtures/caption_1_16_1_fitsize_off.ass)."""
+        vert, cues = self._vertical(), self._fit_cues()
+        ass = OUT / "cap_fit_off.ass"
+        script("caption.py", vert, "--text", cues, "--platform", "tiktok", "--max-lines", "2",
+               "--animate", "fade", "--font", "DejaVu Sans", "--fit-size", "off",
+               "--write-ass", ass, "-o", OUT / "cap_fit_off.mp4")
+        pinned = Path(__file__).resolve().parent / "fixtures" / "caption_1_16_1_fitsize_off.ass"
+        self.assertEqual(ass.read_bytes(), pinned.read_bytes())
+
+    def test_caption_fit_size_auto_leaves_an_explicit_size_alone(self):
+        vert, cues = self._vertical(), self._fit_cues()
+        data = json.loads(script("caption.py", vert, "--text", cues, "--platform", "tiktok",
+                                 "--size", "30", "--max-lines", "2",
+                                 "-o", OUT / "cap_fit_explicit.mp4", "--json").stdout)
+        self.assertEqual(data["caption"]["size_used"], 30)
+        self.assertEqual(data["caption"]["size_requested"], 30)
+
+    def test_caption_plan_before_the_input_exists_uses_the_platform_frame(self):
+        """A plan that names a different FontSize from the run that executes it is not a plan.
+        With --platform there is a real frame to fit against; without one there is nothing, and
+        size_used says null rather than presenting the requested size as the fitted one."""
+        cues = self._fit_cues()
+        missing = OUT / "not_yet_recorded.mp4"
+        if missing.exists():
+            missing.unlink()
+        planned = json.loads(script("caption.py", missing, "--text", cues, "--platform", "tiktok",
+                                    "--dry-run", "-o", OUT / "plan_fit.mp4", "--json").stdout)
+        real = json.loads(script("caption.py", self._vertical(), "--text", cues,
+                                 "--platform", "tiktok", "--dry-run",
+                                 "-o", OUT / "plan_fit2.mp4", "--json").stdout)
+        self.assertEqual(planned["caption"]["size_used"], real["caption"]["size_used"])
+        self.assertLess(planned["caption"]["size_used"], planned["caption"]["size_requested"])
+        self.assertEqual(planned["caption"]["size_source"], "platform-frame")
+        burn = next(c for c in planned["commands"] if "FontSize" in c)
+        self.assertIn(f"FontSize={planned['caption']['size_used']}", burn)
+
+        # no platform and no input: nothing to measure against, so nothing is claimed
+        blind = json.loads(script("caption.py", missing, "--text", cues, "--dry-run",
+                                  "-o", OUT / "plan_fit3.mp4", "--json").stdout)
+        self.assertIsNone(blind["caption"]["size_used"])
+        self.assertEqual(blind["caption"]["size_requested"], 24)
+
+    def test_caption_min_size_above_size_is_an_input_refusal(self):
+        vert, cues = self._vertical(), self._fit_cues()
+        out = OUT / "cap_fit_refuse.mp4"
+        if out.exists():
+            out.unlink()
+        r = script("caption.py", vert, "--text", cues, "--size", "24", "--min-size", "30",
+                   "-o", out, "--json", expect_fail=True)
+        data = json.loads(r.stdout)
+        self.assertEqual(data["error"]["kind"], "input")
+        self.assertIn("--min-size", data["error"]["message"])
+        self.assertFalse(out.exists())
+
+    def test_caption_mux_is_unaffected_by_the_fitter(self):
+        """Soft subtitles carry no size, so --mode mux writes the SRT 1.16 wrote."""
+        vert, cues = self._vertical(), self._fit_cues()
+        a, b = OUT / "cap_mux_auto.mkv", OUT / "cap_mux_off.mkv"
+        script("caption.py", vert, "--text", cues, "--mode", "mux", "--platform", "tiktok",
+               "--write-srt", OUT / "cap_mux_auto.srt", "-o", a)
+        script("caption.py", vert, "--text", cues, "--mode", "mux", "--platform", "tiktok",
+               "--fit-size", "off", "--write-srt", OUT / "cap_mux_off.srt", "-o", b)
+        self.assertEqual((OUT / "cap_mux_auto.srt").read_bytes(),
+                         (OUT / "cap_mux_off.srt").read_bytes())
 
 class ScriptFontTests(unittest.TestCase):
     """1.12: which script text is written in, and a font file that actually covers it."""
@@ -2517,6 +2661,121 @@ class PhraseWrapTests(unittest.TestCase):
         self.assertLess(C.break_penalty("\u306f", "\u4e16", "ja"),         # after a particle
                         C.break_penalty("\u6c7a", "\u307e", "ja"))         # inside a word
         self.assertEqual(C.break_penalty("\u3042", "\u3063", "ja"), 1.0)  # small kana may not start a line
+
+
+class FitSizeTests(unittest.TestCase):
+    """1.17: the caption size is fitted to the cue before the cue is split (eval 17).
+
+    Pure -- no fixtures, no ffmpeg. The geometry and the requested size come from the platform
+    table, never from a pinned float, so the lock moves if the platform's caption default moves.
+    """
+
+    # The eval-17 cues, verbatim. cw1 and dl1 carry the same English sentence.
+    CW1 = "A third line the tool times for me"
+    DL4 = "Una tercera l\u00ednea con tiempos autom\u00e1ticos"
+    DL4B = "Segunda l\u00ednea de subt\u00edtulos"
+
+    def setUp(self):
+        sys.path.insert(0, str(SCRIPTS))
+        import importlib
+        self.caption = importlib.import_module("caption")
+        self._platforms = importlib.import_module("_platforms")
+        frame = self._platforms.PLATFORMS["tiktok"]["frame"]
+        self.W, self.H = frame["w"], frame["h"]
+        self.SIZE = self._platforms.caption_defaults("tiktok")["size"]
+
+    def _fit(self, cues, **kw):
+        kw.setdefault("size", self.SIZE)
+        kw.setdefault("max_lines", 2)
+        return self.caption.fit_size(cues, play_w=self.W, play_h=self.H, **kw)
+
+    def _wrap(self, text, size):
+        em = self.caption.line_em_for_size(size, self.W, self.H)
+        return self.caption.wrap_text(text, em)
+
+    def test_the_floor_is_four_and_a_half_percent_of_the_frame(self):
+        C = self.caption
+        self.assertEqual(C.MIN_CAPTION_FRACTION, 0.045)
+        self.assertEqual(self._platforms.ass_units(C.MIN_CAPTION_FRACTION), 13)
+        self.assertEqual(self._fit([self.CW1])["floor"], 13)
+
+    def test_eval17_cues_fit_two_lines_at_the_shrunk_size(self):
+        """The regression lock. At the TikTok caption size every one of these needs three or
+        four lines, so --max-lines 2 split each into consecutive cues; shrinking fits them."""
+        # At the requested size, all three are over the line budget -- the defect.
+        for text in (self.CW1, self.DL4, self.DL4B):
+            self.assertGreater(len(self._wrap(text, self.SIZE)), 2)
+
+        cw1 = self._fit([self.CW1])
+        self.assertEqual(cw1["size"], 16)
+        self.assertEqual(self._wrap(self.CW1, 16), ["A third line the", "tool times for me"])
+
+        dl4 = self._fit([self.DL4])
+        self.assertEqual(dl4["size"], 13)
+        self.assertEqual(self._wrap(self.DL4, 13),
+                         ["Una tercera l\u00ednea con", "tiempos autom\u00e1ticos"])
+
+        # 19, not 18: 18 is simply the next size the spec's coarse table sampled. 19 is the
+        # largest size at which this cue fits two lines, and the fitter returns the largest.
+        dl4b = self._fit([self.DL4B])
+        self.assertEqual(dl4b["size"], 19)
+        self.assertEqual(self._wrap(self.DL4B, 19), ["Segunda l\u00ednea", "de subt\u00edtulos"])
+
+        whole = self._fit([self.CW1, self.DL4, self.DL4B])
+        self.assertEqual(whole["size"], 13)
+        self.assertEqual(whole["scope"], "file")
+        self.assertTrue(whole["fits"])
+        self.assertEqual(whole["shrunk"], 3)
+        for text in (self.CW1, self.DL4, self.DL4B):
+            self.assertLessEqual(len(self._wrap(text, whole["size"])), 2)
+
+    def test_fit_size_never_goes_below_the_floor(self):
+        # One unbreakable run far wider than the line at any size in range.
+        fit = self._fit(["Donaudampfschifffahrtsgesellschaftskapitaenspatentpruefung " * 3])
+        self.assertEqual(fit["size"], 13)
+        self.assertEqual(fit["floor"], 13)
+        self.assertFalse(fit["fits"])
+
+    def test_fit_size_leaves_a_cue_that_already_fits_alone(self):
+        fit = self._fit(["Short line"])
+        self.assertEqual(fit["size"], self.SIZE)
+        self.assertEqual(fit["shrunk"], 0)
+
+    def test_fit_size_honours_an_explicit_min_size(self):
+        fit = self._fit([self.DL4], min_size=16)
+        self.assertEqual(fit["floor"], 16)
+        self.assertEqual(fit["size"], 16)
+        self.assertFalse(fit["fits"])
+
+    def test_fit_size_without_geometry_changes_nothing(self):
+        fit = self.caption.fit_size([self.DL4], size=self.SIZE, max_lines=2,
+                                    play_w=None, play_h=None)
+        self.assertEqual(fit["size"], self.SIZE)
+        self.assertEqual(fit["shrunk"], 0)
+
+    def test_scope_cue_gives_per_cue_sizes(self):
+        fit = self._fit([self.CW1, self.DL4, "Short line"], scope="cue")
+        self.assertEqual(fit["scope"], "cue")
+        self.assertEqual(fit["per_cue"][0], 16)
+        self.assertEqual(fit["per_cue"][1], 13)
+        self.assertEqual(fit["per_cue"][2], self.SIZE)
+        self.assertEqual(fit["size"], min(fit["per_cue"].values()))
+
+    def test_fit_size_accepts_cue_tuples(self):
+        tuples = [(0.0, 1.0, self.CW1), (1.0, 2.0, self.DL4)]
+        self.assertEqual(self._fit(tuples)["size"], self._fit([self.CW1, self.DL4])["size"])
+
+    def test_fit_size_is_pure(self):
+        """No subprocess, no ffmpeg, no ffprobe: the size is a text measurement."""
+        import importlib
+        _common = importlib.import_module("_common")
+        def boom(*a, **k):
+            raise AssertionError("fit_size ran a subprocess")
+        with unittest.mock.patch.object(_common, "run", boom), \
+             unittest.mock.patch.object(_common, "run_analysis", boom), \
+             unittest.mock.patch.object(subprocess, "run", boom), \
+             unittest.mock.patch.object(subprocess, "Popen", boom):
+            self.assertEqual(self._fit([self.CW1])["size"], 16)
 
 
 if __name__ == "__main__":

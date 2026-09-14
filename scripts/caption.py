@@ -40,17 +40,27 @@ import unicodedata
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from _platforms import PLATFORMS, PLATFORM_CHOICES, ass_units, resolve as resolve_platform
+from _platforms import (PLATFORMS, PLATFORM_CHOICES, ASS_SCRIPT_HEIGHT, ass_units,
+                        resolve as resolve_platform)
 from _ass_overlay import EMOJI_SENTINEL, emoji_placeholder, ass_escape
 from _common import emoji_filter_chain, EMOJI_ASSET_HINT, emoji_asset_for, emoji_codepoint_name, emoji_support, resolve_emoji_assets, ADVANCE_EM, LATIN_EM, NO_SPACE_SCRIPTS, _char_em, char_script, text_width_em, emoji_clusters, has_emoji, detect_script, BIDI_SCRIPTS, STATE, brand_states_font, script_font_for_text, signed_time_arg, brand_caption_style, color_hex, load_brand, video_args, add_common, apply_common, emit, aac_args, cfr_args, default_output, die, escape_filter_path, ffmpeg_base, fmt_srt_time, fmt_smpte_time, info, MissingFpsError, parse_time, probe, run, x264_args, X264_PRESETS, read_text_or_die, fmt_secs
 # The line breaker, lifted into _common/text.py in 1.16.0 so graphics.py can use the same rules.
+# The ASR bridge and the SRT reader/writer live in _common.asr since 1.17 (silence.py --filler
+# shares them). They stay caption.py's public names -- every caller and test that reached for
+# caption.parse_srt / caption.transcribe / caption.whisper_word_timings before 1.17 still does.
+from _common import (ASR_INSTALL_HINT, die_no_engine, parse_srt, transcribe, whisper_word_timings,
+                     write_srt)
 from _common import (SAFE_WIDTH_FRACTION, ORPHAN_MIN_EM, WRAP_MODES, wrap_text, wrap_variants, best_break,
+                     fit_size, line_em_for_size, MIN_CAPTION_FRACTION,
                      break_penalty, _is_weak_line, _atoms, _join, _break_spaced, _bare_word, _function_words,
                      _split_hyphens, FUNCTION_WORDS, JA_PARTICLES, JA_SENTENCE_END, _fix_orphans, _rebalance)
 
 # The breaker's names are caption.py's public surface as much as _common's: every caller and test
 # that reached for `caption.wrap_text` before 1.16 still does.
-__all__ = ["SAFE_WIDTH_FRACTION", "ORPHAN_MIN_EM", "WRAP_MODES", "wrap_text", "wrap_variants",
+__all__ = ["parse_srt", "write_srt", "transcribe", "whisper_word_timings", "die_no_engine",
+           "ASR_INSTALL_HINT",
+           "SAFE_WIDTH_FRACTION", "ORPHAN_MIN_EM", "WRAP_MODES", "wrap_text", "wrap_variants",
+           "fit_size", "line_em_for_size", "MIN_CAPTION_FRACTION",
            "best_break", "break_penalty", "_is_weak_line", "_atoms", "_join", "_break_spaced",
            "_bare_word", "_function_words", "_split_hyphens", "FUNCTION_WORDS", "JA_PARTICLES",
            "JA_SENTENCE_END", "_fix_orphans", "_rebalance", "char_script", "NO_SPACE_SCRIPTS",
@@ -95,150 +105,6 @@ def parse_text_cues(path: str, auto_seconds: float, gap: float, fps: Optional[fl
     if not cues:
         die(f"no cues found in {path}")
     return cues
-
-
-def transcribe(video: str, out_srt: str, language: Optional[str], model: str, audio_stream: int = 0) -> List[Tuple[float, float, str]]:
-    """Optional local ASR bridge. Tries, in order: whisper-cli / main (whisper.cpp), faster-whisper (python),
-    whisper (openai-whisper CLI). Produces an SRT with word timings where the engine supports it.
-    No engine installed -> clear error with install hints; the skill never depends on one."""
-    import shutil
-    import subprocess
-    import tempfile
-    from _common import require_tool, run_analysis, STATE
-    ffmpeg = require_tool("ffmpeg")
-    tmpdir = tempfile.mkdtemp(prefix="ffskill_asr_")
-    try:
-        return _transcribe_in(tmpdir, video, out_srt, language, model, audio_stream, ffmpeg, shutil, subprocess)
-    finally:
-        shutil.rmtree(tmpdir, ignore_errors=True)
-
-
-def _asr_run(cmd: List[str], subprocess, name: str) -> "subprocess.CompletedProcess":
-    """Run a speech-to-text engine under the same wall-clock limit as an ffmpeg call."""
-    from _common import STATE, die
-    limit = STATE.timeout or None
-    try:
-        return subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=limit)
-    except subprocess.TimeoutExpired:
-        die(f"{name} exceeded the {limit:.0f} s time limit and was killed; raise --timeout for a long recording",
-            code=124, kind="timeout")
-    return None  # unreachable
-
-
-def _transcribe_in(tmpdir: str, video: str, out_srt: str, language: Optional[str], model: str, audio_stream: int,
-                   ffmpeg: str, shutil, subprocess) -> List[Tuple[float, float, str]]:
-    from _common import run_analysis, STATE, die
-    wav = os.path.join(tmpdir, "audio.wav")
-    # A wav in our own temp dir: a measurement input for the engine, not a deliverable, so it
-    # is not a run() call (no --dry-run gate, not recorded), but it keeps the time limit and
-    # reports an unreadable input as kind ffmpeg instead of a CalledProcessError traceback.
-    run_analysis([ffmpeg, "-hide_banner", "-loglevel", "error", "-nostdin", "-y", "-i", video,
-                  "-map", f"0:a:{audio_stream}", "-vn", "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le", wav])
-    # 1. whisper.cpp
-    cli = shutil.which("whisper-cli") or shutil.which("whisper-cpp")
-    if not cli:
-        # older whisper.cpp builds ship the binary as plain `main`; accept it only when it lives
-        # in a directory that names whisper, so an unrelated /usr/bin/main is never run
-        main_bin = shutil.which("main")
-        if main_bin and "whisper" in os.path.dirname(os.path.realpath(main_bin)).lower():
-            cli = main_bin
-    if cli:
-        model_path = model
-        if not os.path.exists(model_path):
-            for cand in (os.path.expanduser(f"~/.cache/whisper.cpp/ggml-{model}.bin"), f"models/ggml-{model}.bin", f"/usr/local/share/whisper/ggml-{model}.bin"):
-                if os.path.exists(cand):
-                    model_path = cand
-                    break
-        base = os.path.join(tmpdir, "out")
-        cmd = [cli, "-m", model_path, "-f", wav, "-osrt", "-of", base]
-        if language:
-            cmd += ["-l", language]
-        proc = _asr_run(cmd, subprocess, "whisper.cpp")
-        if proc.returncode == 0 and os.path.exists(base + ".srt"):
-            info(f"transcribed with whisper.cpp ({os.path.basename(cli)}, model {os.path.basename(model_path)})")
-            cues = parse_srt(base + ".srt")
-            write_srt(cues, out_srt)
-            return cues
-        info("whisper.cpp found but failed: " + (proc.stderr.strip().splitlines() or ["?"])[-1][:200])
-    # 2. faster-whisper (python package)
-    try:
-        from faster_whisper import WhisperModel  # type: ignore
-        import threading
-        result: list = []
-
-        def work() -> None:
-            m = WhisperModel(model, device="cpu", compute_type="int8")
-            segments, _ = m.transcribe(wav, language=language, word_timestamps=False)
-            result.extend((seg.start, seg.end, seg.text.strip()) for seg in segments if seg.text.strip())
-
-        # An in-process engine gets the same wall-clock limit as the CLI engines and ffmpeg.
-        t = threading.Thread(target=work, daemon=True)
-        t.start()
-        t.join(STATE.timeout or None)
-        if t.is_alive():
-            die(f"faster-whisper exceeded the {STATE.timeout:.0f} s time limit; raise --timeout for a long recording", code=124, kind="timeout")
-        cues = list(result)
-        if cues:
-            info("transcribed with faster-whisper")
-            write_srt(cues, out_srt)
-            return cues
-    except ImportError:
-        pass
-    # 3. openai-whisper CLI
-    if shutil.which("whisper"):
-        cmd = ["whisper", wav, "--model", model, "--output_format", "srt", "--output_dir", tmpdir]
-        if language:
-            cmd += ["--language", language]
-        proc = _asr_run(cmd, subprocess, "openai-whisper")
-        srt = os.path.join(tmpdir, "audio.srt")
-        if proc.returncode == 0 and os.path.exists(srt):
-            info("transcribed with openai-whisper")
-            cues = parse_srt(srt)
-            write_srt(cues, out_srt)
-            return cues
-    die("no local speech-to-text engine found for --transcribe.\n"
-        "Install one (all run offline):\n"
-        "  whisper.cpp:    brew install whisper-cpp   (then download a model: ggml-base.bin)\n"
-        "  faster-whisper: pip install faster-whisper\n"
-        "  openai-whisper: pip install openai-whisper\n"
-        "Or write the cues by hand with --text cues.txt (see format above).")
-    return []
-
-
-def parse_srt(path: str) -> List[Tuple[float, float, str]]:
-    cues: List[Tuple[float, float, str]] = []
-    block: List[str] = []
-    content = read_text_or_die(path, "--srt").lstrip("\ufeff").replace("\r\n", "\n") + "\n\n"
-    for line in content.split("\n"):
-        if line.strip():
-            block.append(line)
-            continue
-        if block:
-            times = next((b for b in block if "-->" in b), None)
-            if times:
-                a, b = times.split("-->")
-                text = "\n".join(block[block.index(times) + 1:]).strip()
-                try:
-                    cues.append((parse_time(a), parse_time(b), text))
-                except ValueError as e:  # includes MissingFpsError: SRT timings are hh:mm:ss,ms, never frames
-                    die(f"{path}: cannot read the timing line {times.strip()!r}: {e}")
-            block = []
-    if not cues:
-        die(f"no cues found in {path}")
-    return cues
-
-
-def write_srt(cues: List[Tuple[float, float, str]], path: str) -> None:
-    with open(path, "w", encoding="utf-8") as fh:
-        for i, (s, e, t) in enumerate(cues, 1):
-            # A blank line is SRT's own block separator (index/timecode/text, blank, next block).
-            # Cue text can contain one -- parse_text_cues() turns a bare "|" into "\n", so a source
-            # line with two adjacent pipes ("a||b") becomes "a\n\nb" -- and writing that blank line
-            # raw would split one cue into two malformed half-blocks (the second missing its own
-            # index/timecode). Collapse any run of blank lines within the cue text to a single
-            # newline so the cue's own text can never fake the format's block boundary.
-            t = re.sub(r"\n{2,}", "\n", t).strip("\n")
-            fh.write(f"{i}\n{fmt_srt_time(s)} --> {fmt_srt_time(e)}\n{t}\n\n")
 
 
 def word_durations_from_audio(video: str, start: float, end: float, n_words: int, audio_stream: int = 0) -> List[int]:
@@ -434,7 +300,8 @@ def plan_emoji(cues, args, play_w, play_h, brand=None):
 
 def layout_cues(cues: List[Tuple[float, float, str]], *, max_em: Optional[float], max_lines: int,
                 min_duration: float, offset: float, wrap: str = "phrase",
-                lang: Optional[str] = None) -> Tuple[List[Tuple[float, float, str]], dict]:
+                lang: Optional[str] = None, per_cue_em: Optional[List[Optional[float]]] = None,
+                per_cue_size: Optional[List[int]] = None) -> Tuple[List[Tuple[float, float, str]], dict]:
     """Shift, wrap, split and lengthen cues so they can actually be read.
 
     `offset` moves every cue (a transcript that runs early/late); `max_em` wraps each cue to the
@@ -442,11 +309,25 @@ def layout_cues(cues: List[Tuple[float, float, str]], *, max_em: Optional[float]
     a cue needing more than `max_lines` lines is split into consecutive cues sharing its time in
     proportion to their text; a cue shorter than `min_duration` is lengthened, never past the next
     cue's start. Returns the new cues and a count of what changed.
+
+    `per_cue_em` (--fit-size-scope cue) gives cue i its OWN line budget instead of the file's:
+    a cue drawn at a larger size has a narrower line in em, and wrapping it to the file-wide
+    budget -- which is the budget of the SMALLEST size -- produced lines that overflowed the
+    frame when they were then drawn large. `per_cue_size` rides along so the caller knows which
+    size each OUTPUT cue belongs to after splits have renumbered them; it comes back as
+    `stats["cue_sizes"]`, one entry per returned cue.
     """
     stats = {"shifted": 0, "wrapped": 0, "split": 0, "extended": 0, "dropped": 0, "rebalanced": 0,
              "wrap": wrap, "phrase_breaks": 0}
     staged: List[Tuple[float, float, str]] = []
-    for start, end, text in cues:
+    staged_sizes: List[Optional[int]] = []
+    for cue_index, (start, end, text) in enumerate(cues):
+        own_em = max_em
+        own_size = None
+        if per_cue_em is not None and cue_index < len(per_cue_em):
+            own_em = per_cue_em[cue_index]
+        if per_cue_size is not None and cue_index < len(per_cue_size):
+            own_size = per_cue_size[cue_index]
         if offset:
             start, end = start + offset, end + offset
             if end <= 0:
@@ -454,14 +335,14 @@ def layout_cues(cues: List[Tuple[float, float, str]], *, max_em: Optional[float]
                 continue
             start = max(0.0, start)
             stats["shifted"] += 1
-        if max_em and max_em > 0:
+        if own_em and own_em > 0:
             # one greedy fill per cue, three answers off it: what gets burnt in, what the
             # greedy wrap would have given (`rebalanced`) and what 1.15's wrap would have
             # given (`phrase_breaks`). Three wrap_text() calls re-ran the atomiser each time.
-            lines, greedy, measured = wrap_variants(text, max_em, mode=wrap, lang=lang)
+            lines, greedy, measured = wrap_variants(text, own_em, mode=wrap, lang=lang)
             if lines != [l for l in text.split("\n") if l.strip()]:
                 stats["wrapped"] += 1
-            if any(text_width_em(l) > max_em for l in lines):
+            if any(text_width_em(l) > own_em for l in lines):
                 # a run with no break point the wrapper may use (a long word, a Thai phrase
                 # without spaces) stays long rather than chopped: say so, and name the fix
                 stats["overlong"] = stats.get("overlong", 0) + 1
@@ -477,11 +358,13 @@ def layout_cues(cues: List[Tuple[float, float, str]], *, max_em: Optional[float]
                 for chunk, weight in zip(chunks, weights):
                     seg = (end - start) * weight / total_w
                     staged.append((t, min(end, t + seg), "\n".join(chunk)))
+                    staged_sizes.append(own_size)
                     t += seg
                 stats["split"] += len(chunks) - 1
                 continue
             text = "\n".join(lines)
         staged.append((start, end, text))
+        staged_sizes.append(own_size)
     out: List[Tuple[float, float, str]] = []
     for i, (start, end, text) in enumerate(staged):
         if min_duration and end - start < min_duration:
@@ -491,6 +374,8 @@ def layout_cues(cues: List[Tuple[float, float, str]], *, max_em: Optional[float]
                 stats["extended"] += 1
                 end = new_end
         out.append((start, end, text))
+    if per_cue_size is not None:
+        stats["cue_sizes"] = staged_sizes
     return out, stats
 
 
@@ -511,12 +396,7 @@ def max_line_em(args, play_w: Optional[int], play_h: Optional[int]) -> Optional[
     --size is in ASS points against a 288-line script (what libass's force_style uses), so the
     rendered pixel size is size * play_h / 288.
     """
-    if not play_w or not play_h or not args.size:
-        return None
-    size_px = args.size * play_h / 288.0
-    if size_px <= 0:
-        return None
-    return (play_w * SAFE_WIDTH_FRACTION) / size_px
+    return line_em_for_size(args.size, play_w, play_h)
 
 
 def parse_ass_dialogue(path: str) -> str:
@@ -561,44 +441,6 @@ def shift_ass_file(src: str, dst: str, offset: float) -> int:
     return n
 
 
-def whisper_word_timings(srt_path: Optional[str]) -> List[Tuple[float, float, str]]:
-    """Word timings from a whisper JSON transcript sitting next to the SRT, if there is one.
-
-    whisper (and faster-whisper, and whisper.cpp's --output-json) can emit per-word start/end
-    times; when they are there, --karaoke should follow the real speech instead of splitting the
-    cue evenly. Looked for as <stem>.json and <stem>.words.json next to the SRT, in either the
-    {"segments": [{"words": [{"word": ..., "start": ..., "end": ...}]}]} or a bare
-    {"words": [...]} shape. Anything unreadable is simply "no word timings".
-    """
-    if not srt_path:
-        return []
-    stem = os.path.splitext(srt_path)[0]
-    for cand in (stem + ".words.json", stem + ".json"):
-        if not os.path.exists(cand):
-            continue
-        try:
-            data = json.loads(Path(cand).read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            continue
-        raw = []
-        if isinstance(data, dict):
-            raw = list(data.get("words") or [])
-            for seg in data.get("segments") or []:
-                raw.extend((seg or {}).get("words") or [])
-        words = []
-        for w in raw:
-            try:
-                text = str(w.get("word") or w.get("text") or "").strip()
-                if text:
-                    words.append((float(w["start"]), float(w["end"]), text))
-            except (AttributeError, KeyError, TypeError, ValueError):
-                continue
-        if words:
-            info(f"karaoke: word timings from {os.path.basename(cand)} ({len(words)} words)")
-            return sorted(words)
-    return []
-
-
 def word_durations_from_timings(words: List[Tuple[float, float, str]], start: float, end: float,
                                 n_words: int) -> Optional[List[int]]:
     """Centiseconds per word for one cue, from real word timings; None when they don't cover it."""
@@ -639,7 +481,7 @@ def write_ass(cues: List[Tuple[float, float, str]], path: str, args, play_w: int
         "", "[Events]", "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text",
     ]
     lines = []
-    for start, end, text in cues:
+    for cue_index, (start, end, text) in enumerate(cues):
         # ASS Dialogue text treats a literal `{...}` as an override block -- real style/animation
         # commands, not literal characters. Cue text (from --text, an SRT, or ASR transcription --
         # all effectively user-controlled) that happens to contain braces would otherwise be
@@ -657,6 +499,15 @@ def write_ass(cues: List[Tuple[float, float, str]], path: str, args, play_w: int
         elif args.animate == "slide":
             fx = "{\\fad(150,150)\\move(%d,%d,%d,%d,0,250)}" % (play_w // 2, play_h - margin + int(30 * scale), play_w // 2, play_h - margin)
         body = text
+        # --fit-size-scope cue: one size per cue, as a leading {\fsN} override. Opt-in only --
+        # see fit_size()'s docstring for why a size that changes cue to cue is not the default.
+        # The size is the one THIS cue was laid out at, carried through layout_cues; re-measuring
+        # here would measure the post-layout text (already carrying the wrap's newlines), which
+        # is a different string from the one the fit was computed on.
+        own_sizes = getattr(args, "_fit_sizes_out", None) or []
+        own = own_sizes[cue_index] if cue_index < len(own_sizes) else None
+        if own and own != args.size:
+            fx += "{\\fs%d}" % int(round(own * scale))
         if args.karaoke:
             # split each line into words and give every word an equal share of the cue (\k is in centiseconds)
             dur_cs = max(1, int(round((end - start) * 100)))
@@ -898,6 +749,15 @@ def main() -> int:
     emo.add_argument("--emoji-max", type=int, default=60,
                      help="most emoji overlays one run may build (default 60)")
     sty.add_argument("--max-lines", type=int, default=2, help="most lines one cue may occupy; a longer cue is split into consecutive cues (default 2)")
+    sty.add_argument("--fit-size", choices=["auto", "on", "off"], default="auto",
+                     help="shrink the caption size until the cue fits --max-lines, BEFORE splitting it: "
+                          "'auto' (default) only when no --size was given, 'on' always, 'off' for 1.16 behaviour")
+    sty.add_argument("--min-size", type=int, default=None,
+                     help="smallest size --fit-size may use, in ASS points (default 13 = 4.5%% of the frame height, "
+                          "the legibility floor)")
+    sty.add_argument("--fit-size-scope", choices=["file", "cue"], default="file",
+                     help="one fitted size for the whole file (default) or one per cue (a size that changes "
+                          "cue to cue reads as a mistake, so it is opt-in)")
     sty.add_argument("--min-duration", type=float, default=1.0, help="shortest time a cue stays on screen in seconds, never past the next cue (default 1.0)")
     sty.add_argument("--wrap", choices=list(WRAP_MODES), default="phrase",
                      help="how a cue too wide for the safe area is broken into lines: 'phrase' (default, 1.16) never "
@@ -930,6 +790,10 @@ def main() -> int:
     if args.brand and bcap.get("box") and not args.box:
         args.box = True
     args.font = args.font or (bcap.get("font") if args.brand else None) or brand.get("font") or "DejaVu Sans"
+    # --fit-size auto shrinks only a size the skill itself chose. An explicit --size is a
+    # statement about the look and is never quietly overridden; a brand's caption size is the
+    # same kind of statement, so it counts as explicit too.
+    args._size_explicit = args.size is not None or bool(args.brand and bcap.get("size") is not None)
     args.size = args.size if args.size is not None else (bcap.get("size", 24) if args.brand else 24)
     args.color = color_hex(args.color or (bcap.get("color") if args.brand else None) or bc.get("text", "FFFFFF"))
     args.outline_color = color_hex(args.outline_color or bc.get("outline", "000000"))
@@ -969,6 +833,11 @@ def main() -> int:
     args.offset = signed_time_arg(str(args.offset), "--offset")
     if args.max_lines < 1:
         die("--max-lines must be at least 1")
+    if args.min_size is not None and args.min_size < 1:
+        die("--min-size must be at least 1", kind="input")
+    if args.min_size is not None and args.min_size > args.size:
+        die(f"--min-size {args.min_size} is larger than --size {args.size}: the floor cannot be "
+            "above the size it is a floor for", kind="input")
     if args.min_duration < 0:
         die("--min-duration cannot be negative")
 
@@ -991,20 +860,95 @@ def main() -> int:
         play_w, play_h = meta["video"]["width"], meta["video"]["height"]
         if meta["video"].get("rotation") in (90, -90, 270, -270):
             play_w, play_h = play_h, play_w
+    # A --plan or --dry-run written before the input exists has no geometry to fit against, and a
+    # plan that describes a different FontSize from the run that executes it is not a plan. When
+    # --platform names a destination, that destination's frame IS the geometry the real run will
+    # have, so the fit is computed against it; with no platform there is nothing to stand in for
+    # the frame, and size_used is reported as null rather than presenting the requested size as
+    # the size that was used.
+    planned_frame = False
+    if not (play_w and play_h) and args.platform and PLATFORMS[args.platform].get("frame"):
+        frame = PLATFORMS[args.platform]["frame"]
+        play_w, play_h = frame["w"], frame["h"]
+        planned_frame = True
+        info(f"[plan] no geometry to measure yet; fitting the caption size against the "
+             f"--platform {args.platform} frame ({play_w}x{play_h})")
 
+    args._fit_floor = args.min_size if args.min_size is not None else ass_units(MIN_CAPTION_FRACTION)
+    fit_unmeasurable = not (play_w and play_h)
+    fit_stats: dict = {"fit_size": args.fit_size, "size_requested": args.size,
+                       "size_used": None if fit_unmeasurable else args.size,
+                       "size_floor": args._fit_floor,
+                       "size_pct_height": round(args.size * 100.0 / ASS_SCRIPT_HEIGHT, 2),
+                       "shrunk": 0, "fit_scope": args.fit_size_scope, "fit_exhausted": False}
     caption_stats: dict = {"shifted": 0, "wrapped": 0, "split": 0, "extended": 0, "dropped": 0,
                            "rebalanced": 0, "wrap": args.wrap, "phrase_breaks": 0}
+    caption_stats.update(fit_stats)
+
+    def fit_params():
+        return dict(size=fit_stats["size_requested"], min_size=args._fit_floor,
+                    max_lines=args.max_lines, play_w=play_w, play_h=play_h,
+                    mode=args.wrap, lang=args.language, scope=args.fit_size_scope)
+
+    def fit_the_size(cue_list):
+        """Shrink --size until every cue fits --max-lines, BEFORE the cue is split.
+
+        This is the whole point of the ordering: at a size the cue cannot fit, layout_cues splits
+        the sentence into consecutive cues and half of it arrives late (eval 17). The text is never
+        touched -- only the type size, and never below the legibility floor.
+        """
+        if args.fit_size == "off" or (args.fit_size == "auto" and args._size_explicit):
+            fit_stats["size_used"] = args.size    # a stated size IS the size used
+            return
+        if fit_unmeasurable:
+            # Nothing to measure against: size_used stays null rather than presenting the
+            # requested size as one that was fitted.
+            return
+        if args.mode == "mux":
+            # Soft subtitles carry no size: the player picks it. Shrinking would change nothing a
+            # viewer sees and would silently change the SRT this run writes, so the mux path is
+            # left exactly as 1.16 wrote it.
+            return
+        fit = fit_size(cue_list, **fit_params())
+        fit_stats["size_used"] = fit["size"]
+        fit_stats["size_source"] = "platform-frame" if planned_frame else "input"
+        fit_stats["shrunk"] = fit["shrunk"]
+        fit_stats["fit_exhausted"] = bool(fit["shrunk"]) and not fit["fits"]
+        fit_stats["size_pct_height"] = round(fit["size"] * 100.0 / ASS_SCRIPT_HEIGHT, 2)
+        if fit["size"] != args.size:
+            info(f"caption size {args.size} -> {fit['size']} ASS units "
+                 f"({fit_stats['size_pct_height']:.1f} % of frame height) so {fit['shrunk']} cue(s) "
+                 f"fit --max-lines {args.max_lines}; floor {args._fit_floor}")
+            args.size = fit["size"]
+        elif fit_stats["fit_exhausted"]:
+            info(f"caption size stays {args.size} ASS units: {fit['shrunk']} cue(s) still need more "
+                 f"than {args.max_lines} line(s) at the floor {args._fit_floor} and are split "
+                 "(--min-size goes smaller; `|` sets the break yourself)")
+        if args.fit_size_scope == "cue":
+            # Each cue is laid out at ITS OWN size, not at the file minimum. A cue drawn larger
+            # has a NARROWER line in em, so wrapping everything to the minimum size's (widest)
+            # budget and then drawing some cues large put lines off the side of the frame.
+            args._fit_cue_em = [line_em_for_size(fit["per_cue"].get(i, fit["size"]),
+                                                 play_w, play_h)
+                                for i in range(len(cue_list))]
+            args._fit_cue_size = [fit["per_cue"].get(i, fit["size"]) for i in range(len(cue_list))]
 
     def lay_out(cue_list):
         """Wrap to the safe area, split past --max-lines, lengthen to --min-duration, shift by
         --offset -- the one place every cue source goes through, so an SRT, a cue file and a
         transcript all come out equally readable."""
+        fit_the_size(cue_list)
         out, stats = layout_cues(cue_list, max_em=max_line_em(args, play_w, play_h),
                                  max_lines=args.max_lines, min_duration=args.min_duration,
-                                 offset=args.offset, wrap=args.wrap, lang=args.language)
+                                 offset=args.offset, wrap=args.wrap, lang=args.language,
+                                 per_cue_em=getattr(args, "_fit_cue_em", None),
+                                 per_cue_size=getattr(args, "_fit_cue_size", None))
+        # which size each OUTPUT cue belongs to, after splits have renumbered them
+        args._fit_sizes_out = stats.pop("cue_sizes", None)
         report_layout(stats)
         caption_stats.clear()
         caption_stats.update(stats)
+        caption_stats.update(fit_stats)
         return out, any(v for k, v in stats.items() if k != "wrap")
 
     # --srt is repeatable since 1.16 (one per language, each with an optional `:lang` suffix).

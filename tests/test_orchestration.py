@@ -21,6 +21,55 @@ from _common import font_for_script, probe, shell_quote  # noqa: E402
 class OrchestrationTests(MediaFixtures):
     """Render, batch and multicam, plus the toolkit-wide invariants every script has to satisfy."""
 
+    # ------------------------------------------- 1.17: a project may ask for beat-snapped clips
+    def test_render_forwards_snap_to_the_clip_cut(self):
+        proj = OUT / "snap_project.json"
+        proj.write_text(json.dumps({
+            "output": str(OUT / "snap_render.mp4"),
+            "snap": {"to": "beats", "tolerance": 0.12, "min_confidence": 0.5},
+            "clips": [{"src": str(self._beats()), "in": "2.03", "out": "6.01"}],
+        }), encoding="utf-8")
+        data = json.loads(script("render.py", proj, "--json").stdout)
+        self.assertEqual(data["snap"]["mode"], "beats")
+        self.assertEqual(data["snap"]["snapped"], 2)
+        self.assertIn("clips", data["stages"])
+
+    def test_render_snap_covers_every_clip_and_survives_a_cache_hit(self):
+        """Only the first clip's moves were reported, and a cached clips stage reported
+        snap: null although the clips had been snapped."""
+        cdir = OUT / "rcache_snap"
+        shutil.rmtree(cdir, ignore_errors=True)
+        proj = OUT / "snap_multi.json"
+        proj.write_text(json.dumps({
+            "output": str(OUT / "snap_multi.mp4"),
+            "snap": {"to": "beats", "tolerance": 0.12},
+            "clips": [{"src": str(self._beats()), "in": "2.03", "out": "5.01"},
+                      {"src": str(self._beats()), "in": "6.03", "out": "9.01"}],
+        }), encoding="utf-8")
+        data = json.loads(script("render.py", proj, "--cache", cdir, "--json").stdout)
+        self.assertEqual(len(data["snap"]["clips"]), 2)
+        self.assertEqual([c["clip"] for c in data["snap"]["clips"]], [0, 1])
+        self.assertTrue(all(c["snapped"] for c in data["snap"]["clips"]))
+        self.assertEqual(data["snap"]["mode"], "beats")     # the shape a caller reads today
+        # second run: the clips come from the cache, and the report must not claim they were
+        # never snapped
+        again = json.loads(script("render.py", proj, "--cache", cdir, "--json").stdout)
+        self.assertIn("clips", again["cache"]["hits"])
+        self.assertIsNotNone(again["snap"])
+        self.assertEqual(len(again["snap"]["clips"]), 2)
+        self.assertEqual(again["snap"]["clips"][0]["source"], "cache")
+
+    def test_render_without_snap_builds_the_same_command_as_before(self):
+        proj = OUT / "nosnap_project.json"
+        proj.write_text(json.dumps({
+            "output": str(OUT / "nosnap_render.mp4"),
+            "clips": [{"src": str(self._beats()), "in": "2.03", "out": "6.01"}],
+        }), encoding="utf-8")
+        data = json.loads(script("render.py", proj, "--dry-run", "--json").stdout)
+        self.assertIsNone(data.get("snap"))
+        self.assertFalse(any("--snap" in c for c in data["commands"]))
+
+
     def test_zero_or_negative_fps_refused_across_every_cfr_script(self):
         """--fps flows straight into cfr_args(meta, args.fps) / a `fps or source_fps or 30.0`
         fallback in several scripts without ever being validated first. `0` is falsy in Python, so
@@ -660,6 +709,285 @@ class OrchestrationTests(MediaFixtures):
         self.assertEqual(len(resp), 1, "only the one real request should get a response")
         self.assertEqual(resp[0]["id"], 1)
         self.assertIn("tools", resp[0]["result"])
+
+    # ------------------------------------------------------------- 1.17: batch.py --jobs N
+    def _jobs_folder(self, name, count=4):
+        folder = OUT / name
+        folder.mkdir(exist_ok=True)
+        for i in range(count):
+            (folder / f"j{i}.mp4").write_bytes(Path(self.src).read_bytes())
+        recipe = folder / "batch.json"
+        recipe.write_text(json.dumps({
+            "glob": "*.mp4", "output_dir": "out", "suffix": "_j",
+            "steps": [["fit.py", "{in}", "--duration", "3", "-o", "{out}"]]}))
+        return folder, recipe
+
+    def test_jobs_summary_is_identical_to_serial(self):
+        """The per-item table is the promise: same order, same keys, whatever order the encodes
+        actually finished in."""
+        folder, recipe = self._jobs_folder("batch_jobs_a")
+        serial = json.loads(script("batch.py", folder, "--recipe", recipe, "--fast",
+                                   "--force", "--jobs", "1", "--json").stdout)
+        parallel = json.loads(script("batch.py", folder, "--recipe", recipe, "--fast",
+                                     "--force", "--jobs", "4", "--json").stdout)
+        self.assertEqual(serial["jobs"], 1)
+        self.assertGreater(parallel["jobs"], 1)
+        self.assertEqual(len(serial["results"]), len(parallel["results"]))
+        for a, b in zip(serial["results"], parallel["results"]):
+            self.assertEqual({k: v for k, v in a.items() if k != "seconds"},
+                             {k: v for k, v in b.items() if k != "seconds"})
+        self.assertEqual(serial["processed"], parallel["processed"])
+        self.assertFalse(parallel["timed_out"])
+        self.assertGreater(parallel["item_seconds_total"], 0)
+
+    def test_results_keep_file_order_with_a_partially_warm_cache(self):
+        """Cached hits were appended in one pass and freshly-processed items after them, so the
+        per-item table came back out of file order whenever the cache was partially warm -- at
+        --jobs 1, the default, not only in parallel."""
+        for jobs in ("1", "3"):
+            with self.subTest(jobs=jobs):
+                folder = OUT / f"batch_order_{jobs}"
+                shutil.rmtree(folder, ignore_errors=True)
+                folder.mkdir(parents=True)
+                for name in ("a.mp4", "b.mp4", "c.mp4"):
+                    (folder / name).write_bytes(Path(self.src).read_bytes())
+                recipe = folder / "batch.json"
+                recipe.write_text(json.dumps({
+                    "glob": "*.mp4", "output_dir": "out", "suffix": "_o",
+                    "steps": [["fit.py", "{in}", "--duration", "3", "-o", "{out}"]]}))
+                first = json.loads(script("batch.py", folder, "--recipe", recipe, "--fast",
+                                          "--jobs", jobs, "--json").stdout)
+                self.assertEqual([Path(r["file"]).name for r in first["results"]],
+                                 ["a.mp4", "b.mp4", "c.mp4"])
+                # warm the cache for a and c only: delete b's output so it must be redone
+                Path(first["results"][1]["output"]).unlink()
+                second = json.loads(script("batch.py", folder, "--recipe", recipe, "--fast",
+                                           "--jobs", jobs, "--json").stdout)
+                self.assertEqual([Path(r["file"]).name for r in second["results"]],
+                                 ["a.mp4", "b.mp4", "c.mp4"])
+                self.assertTrue(second["results"][0].get("cached"))
+                self.assertFalse(second["results"][1].get("cached"))
+                self.assertTrue(second["results"][2].get("cached"))
+
+    def test_a_worker_that_raises_becomes_a_failed_row_not_a_dead_run(self):
+        """A die() inside a worker thread raised SystemExit through fut.result() and took the
+        process down before the summary and the table were printed. The one thing the user needs
+        -- which item failed and which succeeded -- was the thing they did not get."""
+        folder = OUT / "batch_worker_raise"
+        shutil.rmtree(folder, ignore_errors=True)
+        folder.mkdir(parents=True)
+        for name in ("ok1.mp4", "ok2.mp4", "ok3.mp4", "ok4.mp4"):
+            (folder / name).write_bytes(Path(self.src).read_bytes())
+        # a step that fails on every item: the run must still report all four rows
+        recipe = folder / "batch.json"
+        recipe.write_text(json.dumps({
+            "glob": "*.mp4", "output_dir": "out", "suffix": "_w",
+            "steps": [["cut.py", "{in}", "--start", "99", "--end", "120", "-o", "{out}"]]}))
+        r = script("batch.py", folder, "--recipe", recipe, "--fast", "--jobs", "2",
+                   "--json", expect_fail=True)
+        data = json.loads(r.stdout)
+        self.assertEqual(len(data["results"]), 4)
+        self.assertEqual([Path(x["file"]).name for x in data["results"]],
+                         ["ok1.mp4", "ok2.mp4", "ok3.mp4", "ok4.mp4"])
+        self.assertTrue(all(not x["ok"] for x in data["results"]))
+        self.assertEqual(data["error"]["kind"], "verification")
+
+    def test_jobs_is_capped_by_cpu_count(self):
+        folder, recipe = self._jobs_folder("batch_jobs_cap", count=2)
+        data = json.loads(script("batch.py", folder, "--recipe", recipe, "--fast",
+                                 "--jobs", "999", "--json").stdout)
+        self.assertEqual(data["jobs_requested"], 999)
+        self.assertLessEqual(data["jobs"], min(os.cpu_count() or 1, 8))
+        self.assertGreaterEqual(data["jobs"], 1)
+
+    def test_jobs_auto_resolves_to_a_number(self):
+        folder, recipe = self._jobs_folder("batch_jobs_auto", count=2)
+        data = json.loads(script("batch.py", folder, "--recipe", recipe, "--fast",
+                                 "--jobs", "auto", "--json").stdout)
+        self.assertLessEqual(data["jobs"], min(os.cpu_count() or 1, 4))
+
+    def test_jobs_rejects_a_non_number(self):
+        folder, recipe = self._jobs_folder("batch_jobs_bad", count=1)
+        r = script("batch.py", folder, "--recipe", recipe, "--fast", "--jobs", "lots",
+                   "--json", expect_fail=True)
+        self.assertEqual(json.loads(r.stdout)["error"]["kind"], "input")
+
+    def test_jobs_share_one_timeout_budget(self):
+        """--timeout is the batch's limit, not each item's: a queue of files cannot quietly take
+        one timeout each.
+
+        The budget is a few milliseconds, so it has certainly expired by the time the first item
+        would be submitted -- the probe, the silence/collision pre-flight and the cache read all
+        run before it. That makes the test a statement about the deadline logic rather than a
+        race between --timeout and however fast this machine encodes: the previous version gave
+        six real encodes one second and passed only when the machine was slow enough.
+        """
+        for jobs in ("1", "2"):
+            with self.subTest(jobs=jobs):
+                folder, recipe = self._jobs_folder(f"batch_jobs_timeout_{jobs}", count=6)
+                r = script("batch.py", folder, "--recipe", recipe, "--timeout", "0.005",
+                           "--force", "--jobs", jobs, "--json", expect_fail=True)
+                data = json.loads(r.stdout)
+                self.assertEqual(data["error"]["kind"], "timeout")
+                self.assertEqual(data["exit_code"], 124)
+                self.assertTrue(data["timed_out"])
+                skipped = [x for x in data["results"] if x.get("skipped") == "timeout"]
+                self.assertTrue(skipped)
+                # every item is still in the table, in file order, none of them claiming success
+                self.assertEqual(len(data["results"]), 6)
+                self.assertEqual([Path(x["file"]).name for x in data["results"]],
+                                 sorted(Path(x["file"]).name for x in data["results"]))
+                self.assertFalse(any(x["ok"] for x in skipped))
+
+    def test_a_stated_timeout_is_the_batchs_budget_but_the_default_is_not(self):
+        """The shared deadline applies when a --timeout was stated, or when --jobs > 1 asked for
+        the batch to be treated as one piece of work. The default sequential path keeps 1.16's
+        per-item ceiling, so a long folder is never cut off part-way by a flag nobody passed."""
+        folder, recipe = self._jobs_folder("batch_default_budget", count=2)
+        data = json.loads(script("batch.py", folder, "--recipe", recipe, "--fast",
+                                 "--force", "--json").stdout)
+        self.assertEqual(data["processed"], 2)
+        self.assertFalse(data["timed_out"])
+
+    def test_jobs_cache_entries_survive_concurrency(self):
+        folder, recipe = self._jobs_folder("batch_jobs_cache", count=6)
+        first = json.loads(script("batch.py", folder, "--recipe", recipe, "--fast", "--force",
+                                  "--jobs", "4", "--json").stdout)
+        self.assertEqual(first["processed"], 6)
+        again = json.loads(script("batch.py", folder, "--recipe", recipe, "--fast",
+                                  "--jobs", "4", "--json").stdout)
+        self.assertTrue(all(x.get("cached") for x in again["results"]),
+                        "every entry written under concurrency must be served back")
+
+    def test_jobs_gives_each_item_its_own_work_dir(self):
+        folder, recipe = self._jobs_folder("batch_jobs_work", count=3)
+        work = OUT / "batch_jobs_work_dir"
+        script("batch.py", folder, "--recipe", recipe, "--fast", "--force", "--jobs", "3",
+               "--work", work)
+        subdirs = sorted(p.name for p in work.iterdir() if p.is_dir())
+        self.assertEqual(len(subdirs), 3)
+        # ... and a serial run keeps the flat layout it always had
+        work2 = OUT / "batch_jobs_work_serial"
+        script("batch.py", folder, "--recipe", recipe, "--fast", "--force", "--jobs", "1",
+               "--work", work2)
+        self.assertEqual([p.name for p in work2.iterdir() if p.is_dir()], [])
+
+
+    # --------------------------------------------------- 1.17: render.py --cache DIR / --from
+    def _cache_project(self, name, preset="x"):
+        proj = OUT / f"{name}.json"
+        proj.write_text(json.dumps({
+            "output": str(OUT / f"{name}_out.mp4"),
+            "clips": [{"src": str(self.src), "in": 0, "out": 3}],
+            "export": {"preset": preset}}), encoding="utf-8")
+        return proj
+
+    def test_render_cache_hit_skips_the_encode(self):
+        cdir = OUT / "rcache_hit"
+        shutil.rmtree(cdir, ignore_errors=True)
+        proj = self._cache_project("cache_hit")
+        first = json.loads(script("render.py", proj, "--cache", cdir, "--json").stdout)
+        self.assertEqual(first["cache"]["hits"], [])
+        self.assertGreater(len(first["commands"]), 0)
+        second = json.loads(script("render.py", proj, "--cache", cdir, "--json").stdout)
+        self.assertIn("export", second["cache"]["hits"])
+        self.assertEqual(second["cache"]["misses"], [])
+        self.assertEqual(second["commands"], [])
+        self.assertEqual(second["stages"], first["stages"])   # a cached stage still happened
+        self.assertTrue(Path(second["output"]).exists())
+
+    def test_render_cache_misses_when_a_stage_arg_changes(self):
+        cdir = OUT / "rcache_arg"
+        shutil.rmtree(cdir, ignore_errors=True)
+        script("render.py", self._cache_project("cache_arg"), "--cache", cdir)
+        changed = json.loads(script("render.py", self._cache_project("cache_arg", preset="reels"),
+                                    "--cache", cdir, "--json").stdout)
+        self.assertIn("clips", changed["cache"]["hits"])      # earlier stage unchanged
+        self.assertIn("export", changed["cache"]["misses"])   # the one that changed re-runs
+
+    def test_render_cache_key_never_crosses_an_ffmpeg_or_skill_version(self):
+        """The version lines are IN the key: a different build misses rather than being asked to
+        trust an artifact it did not write."""
+        sys.path.insert(0, str(SCRIPTS))
+        import importlib
+        render = importlib.import_module("render")
+        argv = ["in.mp4", "-o", "out.mp4", "--preset", "x"]
+        render.CACHE["ffmpeg"] = "7.1"
+        a = render.cache_key("export", "export.py", argv, [])
+        render.CACHE["ffmpeg"] = "5.1"
+        b = render.cache_key("export", "export.py", argv, [])
+        self.assertNotEqual(a, b)
+        render.CACHE["ffmpeg"] = "7.1"
+        self.assertEqual(render.cache_key("export", "export.py", argv, []), a)
+        self.assertNotEqual(a, render.cache_key("export", "export.py", argv + ["--crf", "20"], []))
+
+    def test_render_cache_never_serves_a_fast_draft_as_the_delivery(self):
+        """--fast rewrites every child's preset to veryfast, and child_args() appends it AFTER
+        the arguments the stage built -- so it was outside the key. A cached draft was handed
+        back to a run that did not ask for a draft, with cache.hits calling it a legitimate
+        reuse."""
+        cdir = OUT / "rcache_fast"
+        shutil.rmtree(cdir, ignore_errors=True)
+        proj = self._cache_project("cache_fast")
+        draft = json.loads(script("render.py", proj, "--cache", cdir, "--fast",
+                                  "--json").stdout)
+        self.assertEqual(draft["cache"]["hits"], [])
+        final = json.loads(script("render.py", proj, "--cache", cdir, "--json").stdout)
+        self.assertEqual(final["cache"]["hits"], [],
+                         "a --fast draft must not be served to a run that did not ask for one")
+        self.assertGreater(len(final["commands"]), 0)
+        # ... and asking for the draft again does hit
+        again = json.loads(script("render.py", proj, "--cache", cdir, "--fast", "--json").stdout)
+        self.assertTrue(again["cache"]["hits"])
+
+    def test_render_cache_key_covers_the_ffmpeg_build_and_the_container(self):
+        sys.path.insert(0, str(SCRIPTS))
+        import importlib
+        render = importlib.import_module("render")
+        argv = ["in.mp4", "-o", "<out>", "--preset", "x"]
+        base = render.cache_key("export", "export.py", argv, [], "out.mp4")
+        self.assertNotEqual(base, render.cache_key("export", "export.py", argv, [], "out.mkv"),
+                            "the container is part of what the stage produces")
+        # the banner, not major.minor: two 7.1.x builds differ in it
+        self.assertRegex(render.ffmpeg_banner(), r"version")
+        saved = render.CACHE.get("ffmpeg")
+        try:
+            render.CACHE["ffmpeg"] = "ffprobe version 7.1.1-0ubuntu1"
+            a = render.cache_key("export", "export.py", argv, [], "out.mp4")
+            render.CACHE["ffmpeg"] = "ffprobe version 7.1.2-0ubuntu1"
+            self.assertNotEqual(a, render.cache_key("export", "export.py", argv, [], "out.mp4"))
+        finally:
+            render.CACHE["ffmpeg"] = saved
+
+    def test_render_cache_writes_nothing_under_dry_run(self):
+        cdir = OUT / "rcache_dry"
+        shutil.rmtree(cdir, ignore_errors=True)
+        data = json.loads(script("render.py", self._cache_project("cache_dry"), "--cache", cdir,
+                                 "--dry-run", "--json").stdout)
+        self.assertEqual(sorted(p.name for p in cdir.iterdir()), [])
+        self.assertIn("cache", data)
+
+    def test_render_from_without_a_cache_refuses(self):
+        r = script("render.py", self._cache_project("cache_from"), "--from", "captions",
+                   "--json", expect_fail=True)
+        err = json.loads(r.stdout)["error"]
+        self.assertEqual(err["kind"], "input")
+        self.assertIn("--cache", err["message"])
+
+    def test_render_from_refuses_when_an_earlier_stage_is_not_cached(self):
+        cdir = OUT / "rcache_from_empty"
+        shutil.rmtree(cdir, ignore_errors=True)
+        r = script("render.py", self._cache_project("cache_from2"), "--cache", cdir,
+                   "--from", "export", "--json", expect_fail=True)
+        err = json.loads(r.stdout)["error"]
+        self.assertEqual(err["kind"], "input")
+        self.assertIn("clips", err["message"])
+
+    def test_render_without_cache_is_unchanged(self):
+        data = json.loads(script("render.py", self._cache_project("cache_none"),
+                                 "--dry-run", "--json").stdout)
+        self.assertIsNone(data.get("cache"))
+
 
     def test_batch_recipe_and_cache(self):
         folder = OUT / "batch_in"

@@ -73,9 +73,20 @@ from _common.probe import (
 from _common.decision import (
     aac_args, add_pad_fill_args, audio_codec_for, AUDIO_CODECS, brand_caption_style, BRAND_DEFAULTS,
     description_block, _evidence_rank, fmt_chapter_time, propose_chapters,
+    filler_spans, FILLER_WORDS, FILLER_AMBIGUOUS, FILLER_DISCOURSE_MARKERS, FILLER_MAX_WORD,
+    FILLER_MIN_GAP, FILLER_PAD, normalise_filler_token,
+    beat_grid, snap_points, BEAT_MIN_CONFIDENCE, BEAT_ONSET_K, BEAT_OCTAVE_MARGIN,
+    BEAT_REFRACTORY_S, BEAT_WINDOW_S, BEAT_SUPPORT_DIVISOR, BEAT_ALIGN_DIVISOR,
+    BEAT_Z_FLOOR, BEAT_Z_SPAN,
+    _onset_strength, _pick_onsets, _autocorrelation_peak, _grid_score,
     brand_states_font, cfr_args, concat_list_line, db_to_linear, default_output, encoder_args, escape_filter_path,
     fmt_secs, fmt_smpte_time, fmt_srt_time, is_audio_output, load_brand, MissingFpsError, pad_filters, parse_time,
     signed_time_arg, SVT_PRESET, time_arg, video_args, x264_args, _x264_raw
+)
+from _common.asr import (
+    ASR_ENGINES, ASR_INSTALL_HINT, _asr_run, die_no_engine, parse_srt, transcribe, _transcribe_in,
+    transcribe_words, _words_from_openai_whisper_json, _words_from_whisper_cpp_json,
+    whisper_word_timings, write_srt
 )
 from _common.color import (
     bt709_tag_args, color_hex, _COLOR_TOKEN_RE, _sdr_bt709, validate_color
@@ -96,11 +107,12 @@ from _common.text import (
     PENALTY_NEUTRAL, PENALTY_OKURIGANA,
     PENALTY_PARTICLE, PENALTY_SENTENCE_END, _rebalance, _rebalance_phrase, SAFE_WIDTH_FRACTION, _split_hyphens,
     _particle_ends, _particle_starts, wrap_text, wrap_variants, WRAP_MODES,
+    fit_size, line_em_for_size, MIN_CAPTION_FRACTION, ass_units_local,
     script_font_for_text, script_font_status, _script_font_uncached, _SCRIPT_RANGES, SCRIPTS, _SHAPING_BUILD_CACHE,
     SHAPING_SCRIPTS, text_width_em, _VS15, _VS16, WINDOWS_FONTS, _ZWJ
 )
 
-from _common import color, decision, runner, text  # noqa: F401,E402
+from _common import asr, color, decision, runner, text  # noqa: F401,E402
 
 # `_common.emit` and `_common.probe` are the FUNCTIONS, as they have always been -- the
 # from-imports above rebound the package attribute the submodule import had set. The two modules
@@ -111,7 +123,7 @@ from _common import color, decision, runner, text  # noqa: F401,E402
 _emit_module = sys.modules["_common.emit"]
 _probe_module = sys.modules["_common.probe"]
 
-_MODULES = (runner, _emit_module, _probe_module, decision, color, text)
+_MODULES = (runner, _emit_module, _probe_module, decision, color, text, asr)
 
 
 class _Facade(_types.ModuleType):
@@ -168,6 +180,12 @@ __all__ = [
     "char_script", "_check_existing_output", "_check_no_overwrite_input", "_check_output_path", "child_args",
     "child_limit", "_CHILDREN", "_cleanup_partial_output", "_cmdline", "CODECS", "color_hex", "_COLOR_TOKEN_RE",
     "concat_list_line", "Context", "_CRF_DEFAULT", "_CURRENT_CTX", "db_to_linear", "decode_pcm_mono", "description_block", "_evidence_rank", "fmt_chapter_time", "propose_chapters",
+    "filler_spans", "FILLER_WORDS", "FILLER_AMBIGUOUS", "FILLER_DISCOURSE_MARKERS",
+    "FILLER_MAX_WORD", "FILLER_MIN_GAP", "FILLER_PAD", "normalise_filler_token",
+    "beat_grid", "snap_points", "BEAT_MIN_CONFIDENCE", "BEAT_ONSET_K", "BEAT_OCTAVE_MARGIN",
+    "BEAT_REFRACTORY_S", "BEAT_WINDOW_S", "BEAT_SUPPORT_DIVISOR", "BEAT_ALIGN_DIVISOR",
+    "BEAT_Z_FLOOR", "BEAT_Z_SPAN",
+    "_onset_strength", "_pick_onsets", "_autocorrelation_peak", "_grid_score",
     "default_font_file", "default_output", "DEFAULT_TIMEOUT", "detect_script", "die", "drawtext_boxborderw",
     "_DRAWTEXT_PENDING", "drawtext_shaping", "drawtext_text_opts", "_DRAWTEXT_TMPDIR", "_drawtext_tmpdir",
     "dry_run_input_pending", "emit", "emoji_asset_for", "EMOJI_ASSET_HINT", "emoji_clusters",
@@ -193,6 +211,9 @@ __all__ = [
     "time_arg", "_timed_out", "_to_float", "_to_int", "_unwatch", "_V2_HANDLED", "validate_color", "verify_output",
     "video_args", "_VS15", "_VS16", "_watch", "WINDOWS_FONTS", "write_plan", "x264_args", "X264_PRESETS",
     "_x264_raw", "_ZWJ",
+    "ASR_ENGINES", "ASR_INSTALL_HINT", "_asr_run", "die_no_engine", "parse_srt", "transcribe",
+    "_transcribe_in", "transcribe_words", "_words_from_openai_whisper_json",
+    "_words_from_whisper_cpp_json", "whisper_word_timings", "write_srt",
     "_atoms", "best_break", "_bare_word", "break_penalty", "_break_spaced", "_cut_penalty", "_fix_orphans",
     "_fix_weak_lines", "_function_words", "FUNCTION_WORDS", "_HYPHENS", "_is_hiragana", "_is_ideograph",
     "_is_kana", "_is_weak_line", "JA_NO_LINE_END", "JA_NO_LINE_START", "JA_PARTICLE_WORDS", "JA_PARTICLES",
@@ -200,5 +221,6 @@ __all__ = [
     "JA_SENTENCE_END", "_join", "ORPHAN_MIN_EM", "PENALTY_FORBIDDEN", "PENALTY_FUNCTION_WORD",
     "PENALTY_IDEOGRAPHS", "PENALTY_NEUTRAL", "PENALTY_OKURIGANA", "PENALTY_PARTICLE", "PENALTY_SENTENCE_END",
     "_rebalance", "_rebalance_phrase", "SAFE_WIDTH_FRACTION", "_split_hyphens", "_particle_ends",
-    "_particle_starts", "wrap_text", "wrap_variants", "WRAP_MODES"
+    "_particle_starts", "wrap_text", "wrap_variants", "WRAP_MODES",
+    "fit_size", "line_em_for_size", "MIN_CAPTION_FRACTION", "ass_units_local"
 ]

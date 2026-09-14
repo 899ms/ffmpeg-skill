@@ -64,6 +64,7 @@ BT.2020 primaries on an SDR transfer, which `hdr_format` names "BT.2020 SDR" -- 
 ### cut.py — cut / join segments
 ```
 cut.py INPUT [--start T] [--end T | --duration T] [--segments A-B,C-D,...] [--accurate] [-o OUT]
+cut.py INPUT --start T --end T --snap beats [--snap-tolerance 0.12] [--snap-source FILE] [--min-confidence 0.5]
 ```
 Times accept `12.5`, `1:30`, `00:01:30.250`. Default is `-c copy` (snaps to
 keyframes, instant, lossless); if the snapped result deviates more than
@@ -73,6 +74,49 @@ Multiple segments are concatenated in the order given. stderr reports whether
 the result was "lossless stream copy" or "re-encoded"; when the snap forced a
 re-encode, the result's `lossless_alternative` names the nearest keyframe
 `--start` that would stream-copy instead, so the trade can be offered.
+
+**`--snap beats` (1.17)** moves each in/out point to the nearest *measured*
+beat within `--snap-tolerance` seconds (default 0.12, about a quarter of a beat
+at 120 BPM). The grid comes from the input's own audio, or from
+`--snap-source` — either a `scenes.py --beats --json` document (no second
+decode) or a separate music file. The snap happens *before* the
+keyframe/tolerance decision, so lossless-vs-accurate is judged on where the cut
+actually lands.
+
+"Measured" is exact: the only points a cut may move onto are the
+`supported_beats` — the grid points a measured onset actually marks — never the
+full regular grid, which by construction runs on through a passage with no music
+in it. A cut asked for inside that passage stays where it was asked for, and
+`snap.grid` is `"supported"` with `snap.grid_points` saying how many there were.
+`--min-confidence` must be greater than 0: at 0 every grid is "reliable",
+including one measured from noise.
+
+The number of in/out points never changes: a point with no beat inside the
+tolerance is returned unchanged, and no point is ever invented. Three
+`kind: input` refusals, nothing written:
+
+- confidence below `--min-confidence` → *"no reliable beat grid in this audio
+  (confidence 0.21, needs 0.5): cutting to invented beats would move your in/out
+  points to times nothing in the audio supports. Re-run with `--snap none`, or
+  pass `--snap-source` from a music bed."*
+- no audio stream → names `--snap none`.
+- no in/out point at all (a whole-file copy) → there is nothing to snap, and
+  this tool never proposes cuts of its own.
+
+Result: `snap.mode`, `snap.tolerance`, `snap.confidence`, `snap.tempo_bpm`,
+`snap.moved` (one row per point, with `from`/`to`/`delta`/`snapped`),
+`snap.snapped`, `snap.unchanged`, `snap.grid`, `snap.grid_points`, and
+`snap.source` (`"measured"` or the path). In a `render.py` result, `snap.clips`
+carries one entry per snapped clip with `clip` naming its index, and the first
+entry's keys are repeated at the top level for a single-clip project. A clip
+served from `--cache` was snapped when it was first rendered, and says so
+(`source: "cache"`) rather than reporting `snap: null`. A `--snap-source`
+document that does
+not carry `beat_grid.supported_beats` (one written before 1.17) is refused
+rather than treated as if every grid point were supported, as is one whose
+`tempo_bpm` is null while it lists beats.
+`render.py` forwards a project's `"snap": {"to": "beats", ...}` (project-wide
+or per clip) to this flag and reports what came back.
 
 ### fit.py — target duration and/or aspect, rotate/flip
 ```
@@ -422,6 +466,9 @@ each shorter clip's last frame (with silence) out to the longest.
 ### silence.py — remove dead air / jump cuts
 ```
 silence.py INPUT [--threshold -35] [--min-silence 0.6] [--margin 0.15] [--min-keep 0.2] [--list] [--edl keep.txt] [-o OUT]
+silence.py INPUT --filler --words transcript.json [--filler-lang auto|en|ja|es|de|fr|pt|it]
+           [--filler-words FILE] [--filler-extra W,W] [--filler-keep W,W] [--filler-pad 0.02]
+           [--transcribe] [--filler-list] [--max-cuts 400]
 ```
 Runs `silencedetect`, keeps `--margin` seconds of air around speech, drops
 gaps shorter than `--min-silence`, and re-encodes once with `select`/`aselect`
@@ -429,6 +476,60 @@ gaps shorter than `--min-silence`, and re-encodes once with `select`/`aselect`
 without rendering; `--edl` saves the kept ranges in `cut.py --segments` format
 so the user can edit the list by hand. Quiet rooms need `--threshold -40`
 to `-45`; noisy ones `-30`. Always tell the user how many seconds were removed.
+
+**`--filler` (1.17)** removes filler words as well, through the same
+`keep_ranges()`/`aselect` graph with more, shorter ranges. It is **never**
+applied without measured word timings: pass `--words` (a whisper JSON carrying
+per-word `start`/`end`) or `--transcribe` (the same local engine `caption.py`
+uses, never required). There is no heuristic fallback — finding an "um" by
+looking for short quiet blips would cut real speech, so the tool refuses
+instead. `--filler-list` reports what would go and writes nothing.
+
+Built-in lists, one per language:
+
+| lang | words |
+|---|---|
+| en | um, uh, erm, hmm, mm, mhm, er, ah |
+| ja | えー, えーと, えっと, あの, あのー, その, そのー, まあ, なんか |
+| es | eh, este, esto, mmm |
+| de | äh, ähm, hm |
+| fr | euh, hein |
+| pt | é, hum |
+| it | ehm |
+
+**Discourse markers are not disfluencies.** `like`, `tipo` and `cioè` are
+deliberately *not* in the default lists: they are grammatical words in most
+sentences, and removing them cuts meaning rather than noise — a judgement about
+content, which this skill does not make. They are reachable with
+`--filler-extra like`, which says so in its own `--help`. Japanese `なんか` is
+in the `ja` list because leaving it out makes the flag useless for Japanese,
+and it is orthographically identical to the pronoun use — so every run that
+removes one warns, and `--filler-keep なんか` takes it back out. Matching is
+case-folded, punctuation-stripped and whole-token only: `umbrella` survives.
+
+Three refusals, all `kind: input`, all before any encode:
+
+- `--filler` with neither `--words` nor `--transcribe` → names both flags.
+- `--transcribe` with no engine on PATH → the same message `caption.py` gives,
+  with the three install lines.
+- `--transcribe` where the engine runs but its build produces no word-level
+  timings → names that engine, says some builds do not support word timestamps,
+  and points at `--words`. (`--transcribe` drives whichever engine is installed
+  with *its* word-timestamp option — whisper.cpp `--output-json-full`,
+  faster-whisper `word_timestamps=True`, openai-whisper `--word_timestamps
+  True` — because an SRT cannot answer this: a cue has a start and an end, a
+  word does not. `--words` is the tested path and the one to prefer.)
+- a transcript with segments but no word-level timings → says that cutting on
+  segment boundaries would remove whole sentences, and how to re-run whisper.
+
+Results: `filler.removed_count`, `filler.removed_seconds`, `filler.removed`
+(one entry per span), `filler.lang`, `filler.list`, `filler.word_timings` and
+`filler.warnings`. The existing `removed_seconds` keeps exactly the meaning it
+has always had — the seconds of **silence** this run removed, the figure the
+same run would report without `--filler` — and `removed_seconds_total` is the
+additive sibling covering everything that went. A filler word quiet enough to
+sit inside a detected silence is merged into it rather than counted twice, so
+the two figures can be equal.
 
 ### join.py — concatenate with transitions
 ```
@@ -447,6 +548,7 @@ output; the result says so with `dropped_non_av_streams: true`.
 ```
 render.py --init project.json                # starter file
 render.py project.json [--fast] [--dry-run] [--stop-after STAGE] [--work DIR --keep]
+render.py project.json --cache DIR [--from STAGE]    # reuse identical stages from a previous run
 render.py plan.json                          # execute a plan written by <tool> --plan plan.json
 ```
 A plan is a single tool's dry run as an artifact: `cut.py in.mp4 --start 2 --end 8
@@ -478,6 +580,40 @@ before `check`, so the markers are in the file that ships (streams copied). The
 entries and the file path are validated before the first stage runs, and the
 stage plans its `metadata.py` command under `--dry-run`/`--plan` like every
 other stage, so the plan lists `chapters` and the run does the same work.
+
+**`--cache DIR` (1.17)** reuses the artifact of a stage that already ran with
+exactly the same arguments and the same inputs. Opt-in only: **there is no
+default cache directory** — one appearing on someone's disk unasked would
+contradict this tool's "a plan leaves nothing behind" posture. The key is a
+sha1 over the stage name, the tool, its arguments (every existing path replaced
+by its content hash), the input hashes, the **forwarded** flags (`--fast`,
+`--overwrite`, `--timeout`, `--codec`), the output's extension, and **the ffmpeg
+build banner, the skill version and the contract version**. `--fast` matters as
+much as any of them: it rewrites every child's preset to `veryfast`, so without
+it in the key a `--cache --fast` draft would be served back to a later run that
+asked for the delivery. The banner rather than `major.minor` because two 7.1.x
+builds with different libx264 produce different bytes from the same command. Those last three are in the key deliberately: a
+different build simply *misses* rather than being asked to trust a file it did
+not write, and a stage whose implementation changed cannot serve back an
+artifact the old one produced. Each entry is `DIR/<key><ext>` plus a
+`DIR/<key>.json` sidecar (stage, versions, creation time, size, seconds). A hit
+hardlinks the artifact into the work directory, or copies it where the
+filesystem will not link — never moves it, since the cache has to outlive the
+run's own cleanup. Any mismatch is a silent miss.
+
+`stages_done` is unchanged: a cached stage is still a stage that happened.
+Nothing is written under `--dry-run`, which instead reports `cache.would_hit`.
+Result: `cache.dir`, `cache.ffmpeg`, `cache.hits`, `cache.misses`,
+`cache.saved_seconds`, `cache.entries`. `--from STAGE` starts at that stage and
+takes every earlier one from the cache; without `--cache`, or when an earlier
+stage is not there, it refuses (`kind: input`) rather than quietly re-encoding
+what it promised to skip. An unwritable cache directory is `kind: output`.
+
+`"snap": {"to": "beats", "tolerance": 0.12, "min_confidence": 0.5, "source":
+"music.mp3"}` at the project root (or inside one clip) forwards `--snap beats`
+to the clip cut for every clip that has `in`/`out`; the measured grid comes back
+in the render result's `snap`. A project without `"snap"` builds the command
+line 1.16 built.
 
 Stages: clips (cut, optional speed) → join (transition) → silence → fit →
 captions → graphics → overlays → audio → loudness → export → chapters → check. Keys mirror the
@@ -549,6 +685,7 @@ already has a picture.
 ### scenes.py — scene changes and highlight candidates
 ```
 scenes.py INPUT [--threshold 10] [--min-scene 1] [--highlights N [--target SECONDS] [--max-scene 15]] [--edl picks.txt] [--sheet scenes.png] [--json]
+scenes.py INPUT --beats [--beat-step 0.01] [--beat-range 60-200] [--min-confidence 0.5] [--json]
 ```
 Lists scenes with audio energy, the loudest moments, and (with
 `--highlights`) proposes N ranges that add up to `--target` seconds, biased to
@@ -559,6 +696,45 @@ threshold; raise `--threshold` to 12 for 0.98 precision at 0.94 recall).
 Dissolves and very slow fades are not cuts and will be missed. Highlights are
 a proposal engine, not a judgement of content: tell the user what it picked
 and why (energy, scene length).
+
+**`--beats` (1.17)** measures the music's beat grid and reports it:
+
+```json
+"beats": [0.0, 0.5, 1.0, ...],            // 25 of them over a 12 s click track
+"beat_grid": {"tempo_bpm": 120.0, "interval": 0.5, "confidence": 0.997,
+              "supported_beats": [0.0, 0.5, 1.0, ...],   // the 24 an onset marks
+              "phase": 0.0, "onsets": 24, "supported": 24, "unsupported": 1,
+              "method": "rms-flux-autocorrelation", "step_s": 0.01,
+              "range_bpm": [60, 200], "usable": true}
+```
+
+Method: onset strength as the half-wave-rectified first difference of
+`log(envelope)`, peaks above `median + 1.5·MAD` over a ±1 s window with a 60 ms
+refractory gap, tempo from the autocorrelation of the onset signal inside
+`--beat-range` with its half and double checked, phase chosen to catch the most
+onset strength. `confidence` is half how far the winning lag stands above the
+other lags (in standard deviations) and half the fraction of onsets that land
+on the grid. With `--beats` the file is decoded once, at 22050 Hz, and the
+`supported + unsupported == len(beats)` always, and `supported_beats` is that
+supported subset — the list `cut.py --snap beats` moves onto.
+
+With `--beats` the file is decoded once, at 22050 Hz, and the 0.5 s scene
+envelope is derived from that same pass rather than from a second 8 kHz decode.
+One consequence worth knowing: `scenes.py X --json` and `scenes.py X --beats
+--json` report very slightly different `audio_rms`/`audio_peak` figures for the
+same file, because the two envelopes are built from PCM at different rates. The
+scene boundaries and their ranking are unaffected; only the fourth decimal of
+the level moves. `--beats` also holds ~2.75x the samples in memory, which is
+worth knowing on a feature-length input.
+
+**A beat grid is a measurement of the music's periodicity, not of where a cut
+belongs.** A low confidence means the audio has no steady pulse — speech,
+ambience, rubato — and the skill will not snap to a grid it cannot measure.
+`scenes.py` is the analysis tool, so it *reports* a weak measurement
+(`usable: false`) rather than refusing it; refusing belongs to the tools that
+would change a file on the strength of it (`cut.py --snap beats`). `--edl` with
+`--beats` is unchanged: beats are never written as an EDL, because a beat is
+not a cut. No audio stream is a `kind: input` refusal.
 
 ### check.py — pre-delivery compliance
 ```
@@ -582,12 +758,41 @@ construction, not by two lists agreeing.
 
 ### batch.py — same recipe over a folder, cached
 ```
-batch.py FOLDER --recipe batch.json [--force] [--watch SECONDS] [--json]
+batch.py FOLDER --recipe batch.json [--force] [--watch SECONDS] [--jobs N|auto] [--json]
 ```
 `batch.json` holds either `steps` (a list of script argv with `{in}`/`{out}`
 placeholders, chained) or `project` (a render project applied per file).
 Outputs land in `output_dir` with `suffix`; a content-hash cache skips files
 already done with the same recipe. Use `--dry-run` to preview the plan.
+
+**`--jobs N` (1.17)** processes N files at once (threads: the work is
+subprocess waiting). Capped at `min(N, cpu_count, 8)` — every item is itself an
+ffmpeg that already threads across cores, so beyond a few concurrent encodes
+the jobs contend and wall-clock stops improving while memory does not. A number
+above the cap is clamped with a note, not refused, and both `jobs` and
+`jobs_requested` are in the result. `--jobs auto` is `min(cpu_count, 4)`.
+
+- **One timeout budget for the whole batch**, not one per item: `--timeout` is
+  computed into a deadline once, no new item starts after it, and the run exits
+  124 `kind: timeout` with the items that never started marked
+  `"skipped": "timeout"`. That shared budget applies when a `--timeout` was
+  actually given, or when `--jobs > 1` asked for the batch to be treated as one
+  piece of work; the default sequential path with the default timeout is 1.16's
+  behaviour exactly, where a long folder was never cut off part-way.
+- **Determinism**: every item is written into its own slot in one list indexed
+  by position in the sorted file list — cached hits included, which is what keeps
+  the table in file order when the cache is only partially warm — and each item's
+  log lines are buffered and flushed in file order, so the per-item table and the
+  log read exactly as a serial run's whatever order the encodes finish in.
+- **A failed item is a row, not a dead run**: a worker that raises becomes
+  `ok: false` with its reason, and the summary and the table are still printed.
+  Ctrl-C cancels what has not started, keeps what finished, and exits 130
+  `kind: interrupted` with the partial table.
+- With `--jobs > 1` each item gets its own work subdirectory
+  `<workdir>/<index>-<stem>/`, because step file names are stem-derived and two
+  sources sharing a stem would otherwise write over each other. `--jobs 1` (the
+  default) keeps the flat layout and is 1.16's path exactly.
+- `--watch` composes: each pass is parallel, passes are sequential.
 
 ### caption.py --transcribe — optional local speech-to-text
 If `whisper-cli` (whisper.cpp), `faster-whisper` or `whisper` is installed,
@@ -726,11 +931,62 @@ caption.py INPUT --srt FILE[:LANG] | --ass FILE | --text CUES.txt [--write-srt O
            [--audio-stream N] [--fps N] [--lang XX] [--offset TIME]
            [--max-lines N] [--min-duration S] [--wrap phrase|measured]
            [--font NAME] [--fonts-dir DIR] [--size N] [--color RRGGBB] [--outline N] [--outline-color RRGGBB]
+           [--fit-size auto|on|off] [--min-size N] [--fit-size-scope file|cue]
            [--bold] [--box] [--position bottom|top|center|top-left|...] [--margin N]
            [--animate none|fade|pop|slide] [--karaoke [--highlight-color RRGGBB]] [--write-ass OUT.ass]
            [--emoji auto|color|png|mono|none] [--emoji-assets DIR] [--emoji-scale 1.0] [--emoji-max 60] [-o OUT]
 caption.py --text CUES.txt --write-srt OUT.srt        # generate the SRT only
 ```
+**`--fit-size` (1.17): the size is fitted before a cue is split.** At the TikTok
+caption size (24 ASS units against the 288-line script grid) a line has about
+six em, so an ordinary sentence needs four lines — and `--max-lines 2` then cut
+it into consecutive cues, so half of it arrived late. That was the size, not the
+breaker. `--fit-size` walks the size down until every cue wraps within
+`--max-lines`, and only then lays the cues out.
+
+- `auto` (default) shrinks only a size the *skill* chose. An explicit `--size`,
+  or a `brand.json` `styles.caption.size`, is a statement about the look and is
+  never overridden.
+- `on` always fits, `--size` or not. **`off` is 1.16.1 exactly, byte for byte**
+  (a pinned ASS fixture asserts it).
+- `--min-size` is the floor, default `ass_units(0.045) = 13` — **4.5 % of the
+  frame height**, one floor for every destination (87 px of type on a 1920-tall
+  frame, above the ~3.5 % where mobile legibility and the platforms' own caption
+  UIs bottom out). Nothing per-platform is measured, so nothing is claimed.
+- `--fit-size-scope file` (default) uses one size for the whole file; `cue`
+  writes a per-cue `{\fsN}` override. A size that changes from cue to cue reads
+  as a mistake, so it is opt-in — it exists for the one outlier cue that would
+  otherwise shrink a ten-minute file. Each cue is laid out at the size it will
+  be **drawn** at: a cue drawn larger has a narrower line in em, so wrapping
+  everything to the file-wide budget and then drawing some cues large would put
+  lines off the side of the frame.
+
+The text is **never** touched: this skill does not rewrite, shorten or
+paraphrase a caption to make it fit. Below the floor the cue is split exactly as
+before and `fit_exhausted: true` says so, with `--min-size` named as the flag
+that would go smaller and `|` as the manual break. `--min-size` above `--size`
+is a `kind: input` refusal. `--mode mux` is unaffected: soft subtitles carry no
+size, so the SRT is the one 1.16 wrote.
+
+Results, alongside the existing caption stats:
+`fit_size`, `size_requested`, `size_used`, `size_floor`, `size_pct_height`,
+`shrunk`, `fit_scope`, `fit_exhausted`, and `size_source` (`input` or
+`platform-frame`).
+
+Under `--dry-run`/`--plan` on an input that does not exist yet there is no
+geometry to measure. With `--platform` the destination's own frame is used —
+that frame *is* what the real run will have, so the planned `FontSize` is the
+one the run will burn. Without a platform nothing can stand in for the frame
+and `size_used` is `null`, rather than presenting the requested size as a
+fitted one.
+
+| ASS size | px on 1920 | % frame h | em per line |
+|---|---|---|---|
+| 24 (default) | 160.0 | 8.3 % | 6.08 |
+| 19 | 126.7 | 6.6 % | 7.67 |
+| 16 | 106.7 | 5.6 % | 9.11 |
+| 13 (floor) | 86.7 | 4.5 % | 11.22 |
+
 Text cue format, one per line: `0:00-0:03 Hello`, `00:00:03.500 --> 00:00:06 Two | lines`,
 or `00:00:03:15 --> 00:00:06:00 SMPTE non-drop-frame timecode` (`hh:mm:ss:ff`, frame count
 converted with `--fps`, or the input video's own fps when `--input` is given and `--fps` is

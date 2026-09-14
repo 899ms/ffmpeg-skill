@@ -4,6 +4,12 @@
 
 ## Unreleased
 
+(nothing yet)
+
+## 1.16.1
+
+_Automated release: version and notes generated from pull requests merged since 1.16.0._
+
 ### Fixed
 
 - **Caption breaking, from eval 17.** A Thai run is no longer broken inside: Thai writes no space
@@ -14,6 +20,8 @@
   count in its caption stats and an info line naming the fix (a space or `|` where the line may
   break, or a smaller `--size`) when a wrapped line is wider than the safe width. `--wrap measured`
   follows the same atom rules (it is the post-passes that differ, not the pieces).
+- fix: captions never break inside a Thai run or a katakana word; over-wide lines are reported (eval 17) (#233)
+- docs: eval 17 at 1.16.0 (90 prompts, focused Opus grader, trigger 45/45) (#232)
 
 ## 1.16.0
 

@@ -6,6 +6,13 @@
 
 (nothing yet)
 
+## 1.19.0
+
+_Automated release: version and notes generated from pull requests merged since 1.18.4._
+
+- feat: multicam.py --write-project reproduces its cut decision as a render.py project (#258)
+- docs: roadmap truth-up at 1.18.4, broken_inside_word in the contract, version-drift test (#256)
+
 ## 1.18.4
 
 _Automated release: version and notes generated from pull requests merged since 1.18.3._

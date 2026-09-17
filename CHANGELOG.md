@@ -6,6 +6,15 @@
 
 (nothing yet)
 
+## 1.18.0
+
+_Automated release: version and notes generated from pull requests merged since 1.17.3._
+
+- feat: 1.18.0 — measured analysis and multicam at scale (#246)
+- docs: roadmap — text.py split refactor shipped (#245)
+- refactor: split _common/text.py into fonts, emoji, drawtext and wrap (no behaviour change) (#244)
+- docs: roadmap — 1.17.3 shipped (eval pending), released-version paragraph (#243)
+
 ## 1.17.3
 
 _Automated release: version and notes generated from pull requests merged since 1.17.2._

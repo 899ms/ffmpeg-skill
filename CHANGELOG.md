@@ -6,6 +6,14 @@
 
 (nothing yet)
 
+## 1.18.4
+
+_Automated release: version and notes generated from pull requests merged since 1.18.3._
+
+- fix: caption word wider than the column breaks at the edge instead of clipping (#255)
+- docs: eval 22 at 1.18.3 — routing-fix re-check and cs1/cs3 recheck (#254)
+- chore: gitignore scratchpad/ (eval staging, not repo content) (#253)
+
 ## 1.18.3
 
 _Automated release: version and notes generated from pull requests merged since 1.18.2._

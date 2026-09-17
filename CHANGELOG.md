@@ -6,6 +6,12 @@
 
 (nothing yet)
 
+## 1.18.3
+
+_Automated release: version and notes generated from pull requests merged since 1.18.2._
+
+- fix: MCP default tools/list is the core 12, opt-in for the full 42 (#252)
+
 ## 1.18.2
 
 _Automated release: version and notes generated from pull requests merged since 1.18.1._

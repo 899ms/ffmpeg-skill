@@ -6,6 +6,12 @@
 
 (nothing yet)
 
+## 1.19.1
+
+_Automated release: version and notes generated from pull requests merged since 1.19.0._
+
+- fix: --filler no longer jump-cuts unrelated silence gaps (#257)
+
 ## 1.19.0
 
 _Automated release: version and notes generated from pull requests merged since 1.18.4._

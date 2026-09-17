@@ -6,6 +6,12 @@
 
 (nothing yet)
 
+## 1.19.2
+
+_Automated release: version and notes generated from pull requests merged since 1.19.1._
+
+- fix: SKILL.md rows for the overlong-word break and MCP core-12 rule; roadmap truth-up at 1.19.1 (#260)
+
 ## 1.19.1
 
 _Automated release: version and notes generated from pull requests merged since 1.19.0._

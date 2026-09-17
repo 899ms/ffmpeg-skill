@@ -6,6 +6,13 @@
 
 (nothing yet)
 
+## 1.18.1
+
+_Automated release: version and notes generated from pull requests merged since 1.18.0._
+
+- fix: 1.18.1 — SKILL.md routing rows for the five 1.18.0 flags (#248)
+- docs: roadmap — 1.18.0 shipped (eval pending) (#247)
+
 ## 1.18.0
 
 _Automated release: version and notes generated from pull requests merged since 1.17.3._

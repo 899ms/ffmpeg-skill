@@ -6,6 +6,14 @@
 
 (nothing yet)
 
+## 1.18.2
+
+_Automated release: version and notes generated from pull requests merged since 1.18.1._
+
+- fix: README routing for scenes/cropdetect/silence/sync/multicam 1.18.0 flags (#251)
+- docs: move 1.17.2 caption-margin write-up out of 1.17.1 (#250)
+- docs: eval 21 at 1.18.0 (12 prompts, discoverability gap found) and 1.18.1 shipped (#249)
+
 ## 1.18.1
 
 _Automated release: version and notes generated from pull requests merged since 1.18.0._

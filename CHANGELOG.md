@@ -6,6 +6,12 @@
 
 (nothing yet)
 
+## 1.19.3
+
+_Automated release: version and notes generated from pull requests merged since 1.19.2._
+
+- fix: graphics.py slices an unbreakable overlong word at the column edge, matching caption.py (#259)
+
 ## 1.19.2
 
 _Automated release: version and notes generated from pull requests merged since 1.19.1._

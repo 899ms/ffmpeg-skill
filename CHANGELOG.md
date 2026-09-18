@@ -6,6 +6,13 @@
 
 (nothing yet)
 
+## 1.22.0
+
+_Automated release: version and notes generated from pull requests merged since 1.21.0._
+
+- feat(batch): report cut.py's stream-copy vs hybrid re-encode rate across a folder (#269)
+- docs(roadmap): truth up the released-version sentence and table to 1.21.0 (#270)
+
 ## 1.21.0
 
 _Automated release: version and notes generated from pull requests merged since 1.20.0._

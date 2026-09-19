@@ -6,6 +6,12 @@
 
 (nothing yet)
 
+## 1.24.0
+
+_Automated release: version and notes generated from pull requests merged since 1.23.0._
+
+- feat(mcp): add a prompts capability with five workflow recipes (#272)
+
 ## 1.23.0
 
 _Automated release: version and notes generated from pull requests merged since 1.22.0._

@@ -22,7 +22,9 @@ Dialogue event per word (active word scaled/emboldened, past/upcoming colours) i
 `\kf` colour-only sweep (#276), and `loudness.py`'s video-stream-copy branch now writes
 `-movflags +faststart` like every other mp4-writing path, fixing a `render.py --template`
 delivery that lost faststart on its `--normalize` pass (#275). 1.25.0 is a `chore:` release bump
-that closes the remaining mp4 stream-copy paths over to `+faststart` too (#279); no script API
+that closes the remaining mp4 stream-copy paths — `audio.py`, `caption.py --mode mux`, `sync.py`
+and `cut.py` — over to `+faststart` too (#279); `metadata.py`'s own `-c copy` tag/chapter write is
+left alone, since its documented guarantee is the container's metadata only. No script API
 change, tool count still 42.
 1.19.0 (the `--write-project` feature) is a `feat:` release, hence the minor bump; it does not
 start the "1.19.0: observability, portability" theme further down this document, which remains

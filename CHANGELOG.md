@@ -6,6 +6,12 @@
 
 (nothing yet)
 
+## 1.25.0
+
+_Automated release: version and notes generated from pull requests merged since 1.24.1._
+
+- Add -movflags +faststart to remaining mp4 stream-copy paths (#279)
+
 ## 1.24.1
 
 _Automated release: version and notes generated from pull requests merged since 1.24.0._

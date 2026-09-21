@@ -4,7 +4,19 @@
 
 ## Unreleased
 
+(nothing yet)
+
+## 1.24.1
+
+_Automated release: version and notes generated from pull requests merged since 1.24.0._
+
 - feat(caption): `--karaoke-style word` -- one ASS Dialogue event per word, active word scaled/emboldened, past/upcoming colours (#276)
+- fix(loudness): stream-copy branch was dropping -movflags +faststart (#277)
+- caption.py: --karaoke-style word for per-word Dialogue events (scale + 3-colour highlight) (#278)
+- docs(skill): regroup the request table by intent, not script name (#274)
+- docs: README documents the MCP prompts capability; roadmap truth-up to 1.24.0 (#273)
+
+Closes: #276
 
 ## 1.24.0
 

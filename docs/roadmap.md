@@ -17,11 +17,12 @@ minor and `fix` PRs into a patch, so each block below is one or two `feat` PRs p
 - **planned** — not released. Nothing below a *planned* heading exists in any published version;
   the feature lines are the intent, not a description of the code.
 
-The released version today is **1.25.0** — `caption.py --karaoke-style word` emits one ASS
-Dialogue event per word (active word scaled/emboldened, past/upcoming colours) instead of the
-`\kf` colour-only sweep (#276), and `loudness.py`'s video-stream-copy branch now writes
-`-movflags +faststart` like every other mp4-writing path, fixing a `render.py --template`
-delivery that lost faststart on its `--normalize` pass (#275). 1.25.0 is a `chore:` release bump
+The released version today is **1.26.0** — eval 23b adds real-execution coverage for
+`caption.py --karaoke-style word` (#276) and the `+faststart` fixes (#275, #277, #279), a
+repo-local `code-review` skill under `.claude/skills/` reviews this repo's own result-document
+honesty and surface rules (#268), and `evals/run.py` now speaks the full 108-prompt corpus with
+regex-only grading so a Cursor/Codex user can run it without this repo's own Claude-based harness
+(#281). No `scripts/` or contract change; tool count still 42.
 that closes the remaining mp4 stream-copy paths — `audio.py`, `caption.py --mode mux`, `sync.py`
 and `cut.py` — over to `+faststart` too (#279); `metadata.py`'s own `-c copy` tag/chapter write is
 left alone, since its documented guarantee is the container's metadata only. No script API

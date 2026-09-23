@@ -4,6 +4,12 @@
 
 ## Unreleased
 
+(nothing yet)
+
+## 2.2.2
+
+_Automated release: version and notes generated from pull requests merged since 2.2.1._
+
 - `join.py --dry-run` no longer fails a plan because one of its inputs is not written yet. The
   pending file's placeholder probe always claimed a video stream, so a TTS list with one line
   still to come was refused as an audio/video mix ("tts_01.wav has no video stream while
@@ -80,6 +86,9 @@
   - `batch.py` names every intermediate of a `.ogg`, `.opus`, `.aac`, `.aif`/`.aiff`, `.caf`
     or `.wma` source `.mp4`, so a `--dry-run` of a join step over those sources is refused as
     an audio/video mix that the real batch completes (as in 2.2.1).
+- fix: join dry-run plans pending inputs; --export-timeline times, frame and FCPXML order (#290)
+- ci: the auto-bump moves the roadmap's released-version sentence (#289)
+- docs: roadmap names 2.2.1 as the released version (#288)
 
 ## 2.2.1
 

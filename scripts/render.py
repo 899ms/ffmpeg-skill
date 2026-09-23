@@ -64,7 +64,7 @@ from typing import Any, Dict, List, Optional, Sequence
 
 from export import PRESETS, PLATFORM_OF
 from _platforms import PLATFORMS, caption_defaults, resolve as resolve_platform
-from _common import STATE, add_common, brand_caption_style, load_brand, apply_common, child_args, die, emit, info, probe, run_tool, place_output, refuse_output_is_input, _check_existing_output, _check_output_path, fingerprint, PLAN_VERSION, ffmpeg_version
+from _common import STATE, add_common, aspect_ratio, brand_caption_style, load_brand, apply_common, child_args, die, emit, info, probe, run_tool, place_output, refuse_output_is_input, _check_existing_output, _check_output_path, fingerprint, PLAN_VERSION, ffmpeg_version
 import subprocess
 from _contract import CONTRACT_VERSION
 from batch import file_key
@@ -394,7 +394,8 @@ def render_pack(names: List[str], args) -> int:
 
 
 def check_keys(obj: Any, schema: str, label: str) -> None:
-    """Refuse an unrecognised key, naming the object, the key and the nearest valid one."""
+    """Refuse an unrecognised key, naming the object, the key and the nearest valid one. A value
+    that is not an object is require_object()'s to refuse, and only where the run reads it."""
     if not isinstance(obj, dict):
         return
     valid = OBJECT_KEYS[schema]
@@ -406,25 +407,76 @@ def check_keys(obj: Any, schema: str, label: str) -> None:
             else f" (valid keys: {', '.join(sorted(valid))})"))
 
 
-def validate_project(proj: Dict[str, Any]) -> None:
+def require_object(obj: Any, label: str) -> None:
+    """Refuse a value that is not an object where the run reads it with .get(): "export": "reels"
+    in a render, a string frame, a clip written as a bare path. 2.2.1 died there with a traceback
+    and nothing on stdout under --json. null, false and {} still ask for nothing."""
+    if obj and not isinstance(obj, dict):
+        die(f"{label}: must be an object {{...}}, got {type(obj).__name__} {obj!r:.60}")
+
+
+# the stage that first reads each section; --stop-after before it means the run never reads it
+READ_AT = {"transition": "join", "silence": "silence", "fit": "fit", "captions": "captions",
+           "graphics": "graphics", "overlays": "overlays", "loudness": "loudness", "export": "export",
+           "check": "check"}
+_READ_ORDER = ["clips", "join", "silence", "fit", "captions", "graphics", "overlays", "audio", "loudness", "export", "check"]
+
+
+def _reaches(stage: str, stop_after: Optional[str]) -> bool:
+    return not stop_after or _READ_ORDER.index(stage) <= _READ_ORDER.index(stop_after)
+
+
+def validate_project(proj: Dict[str, Any], timeline: bool = False, stop_after: Optional[str] = None) -> None:
+    """Every project error the run would hit, before the first ffmpeg call. A value that is not
+    an object is refused only where this run reads it (require_object()): a full render reads
+    every stage's section, a transition only between two or more clips and a clip's snap only
+    on a clip it cuts; --export-timeline (`timeline`) reads the clips, frame, audio and a
+    transition between clips, and only names the other sections in not_exported. 2.2.1 rendered
+    a single clip with "transition": "none" and exported "captions": "subs.srt", reading neither,
+    and a patch release does not refuse them."""
     check_keys(proj, "project", "project")
+    clips = proj.get("clips")
+    # the join (or the timeline's dissolves) reads the transition; an audiogram render joins nothing
+    several = isinstance(clips, list) and len(clips) > 1 and (timeline or not proj.get("audiogram"))
+    read = {"frame", "audio"} | ({"transition"} if several else set())
+    if not timeline:
+        read |= {"silence", "audiogram", "captions", "loudness", "fit", "export", "check", "snap"}
+        # --stop-after ends the run before later stages read their sections: 2.2.1 completed a
+        # `--stop-after fit` preview of a project with "captions": "subs.srt", never reading it
+        read = {n for n in read if n not in READ_AT or _reaches(READ_AT[n], stop_after)}
     for name in ("frame", "transition", "silence", "audiogram", "captions", "audio", "loudness", "fit", "export", "check", "snap"):
+        if name in read:
+            require_object(proj.get(name), name)
         check_keys(proj.get(name), name, name)
     check_keys((proj.get("audio") or {}).get("stems"), "audio.stems", "audio.stems")
     if isinstance(proj.get("chapters"), list):
         # Every other project error is raised here, before the first ffmpeg call; a chapter typo
         # found inside the last stage costs a whole render and leaves an unchaptered file behind.
         for i, item in enumerate(proj["chapters"]):
-            check_keys(item, "chapters[]", f"chapters[{i}]")
+            if isinstance(item, dict):
+                check_keys(item, "chapters[]", f"chapters[{i}]")
             if not isinstance(item, dict) or item.get("at") is None or not str(item.get("title") or "").strip():
                 die(f'chapters[{i}]: needs {{"at": TIME, "title": STR}}')
     for name in ("clips", "graphics", "overlays"):
         items = proj.get(name)
-        if isinstance(items, list):
-            for i, item in enumerate(items):
-                check_keys(item, f"{name}[]", f"{name}[{i}]")
-                if name == "clips" and isinstance(item, dict) and item.get("snap") is not None:
-                    check_keys(item["snap"], "snap", f"clips[{i}].snap")
+        if name == "clips" or (not timeline and _reaches(READ_AT[name], stop_after)):  # the export reads only the clips
+            if items and not isinstance(items, list):
+                die(f"{name}: must be a list of objects [{{...}}], got {type(items).__name__} {items!r:.60}")
+            for i, item in enumerate(items or []):
+                if not isinstance(item, dict):
+                    die(f"{name}[{i}]: must be an object {{...}}, got {type(item).__name__} {item!r:.60}")
+        for i, item in enumerate(items if isinstance(items, list) else []):
+            check_keys(item, f"{name}[]", f"{name}[{i}]")
+            if name != "clips":
+                continue
+            # every clip stage starts from rel(c["src"]): without one it was a KeyError traceback
+            if not item.get("src"):
+                die(f"clips[{i}]: no src")
+            if item.get("snap") is not None:
+                # the render reads a clip's snap only on a clip it cuts (in/out), the export never
+                if not timeline and (item.get("in") is not None or item.get("out") is not None):
+                    require_object(item["snap"], f"clips[{i}].snap")
+                check_keys(item["snap"], "snap", f"clips[{i}].snap")
 
 
 _LAST_DOC: Dict[str, Any] = {}   # the JSON document the most recent sh() child printed
@@ -703,7 +755,11 @@ def frame_from_preset(frame: Dict[str, Any], export: Dict[str, Any]) -> None:
     """Fill frame.width/height from the export preset when the project gave only an aspect.
     Eval 7 (j08 twice, e01 by hand): "frame": {"aspect": "9:16"} with a reels export fitted a
     1280x720 source to 406x720, captions were burned at that size, and export.py upscaled them
-    soft. A preset that names a delivery frame of the same aspect is that frame."""
+    soft. A preset that names a delivery frame of the same aspect is that frame.
+    The match is 2.2.1's, looser than aspect_ratio(): `16/9` and `1.78:1` still take a 16:9
+    preset's size. A render that hands such a frame.aspect to fit.py fails there, as in 2.2.1;
+    one whose own fit.aspect replaces it, or that stops before fit, is sized by this match, and
+    a patch release does not change a render 2.2.1 completed."""
     if not frame.get("aspect") or frame.get("width") or frame.get("height"):
         return
     preset = PRESETS.get(str(export.get("preset") or ""), {})
@@ -733,8 +789,20 @@ def export_timeline(proj: Dict[str, Any], rel, dest: str) -> int:
         if not os.path.exists(path):
             die(f"timeline source not found: {path}")
         probes[path] = probe(path)  # a timeline needs real durations and rates, dry run or not
+    # the sequence frame is the one the render would deliver: an aspect-only frame takes its size
+    # from the export preset exactly as the render's own frame does. An export that is not an
+    # object names no preset here: 2.2.1's export never read it, and validate_project() refuses
+    # it only in the render, which reads it.
+    frame = dict(proj.get("frame") or {})
+    export = proj.get("export")
+    frame_from_preset(frame, export if isinstance(export, dict) else {})
+    fit = proj.get("fit")
+    if isinstance(fit, dict) and fit.get("aspect") and frame.get("aspect") and aspect_ratio(frame["aspect"]) is None:
+        # the render hands fit.py the fit object's own aspect, never this one (only the preset
+        # match above reads it), and completes: the sequence is the frame's size without it
+        del frame["aspect"]
     try:
-        tl = tlmod.build(proj, probes, rel)
+        tl = tlmod.build(dict(proj, frame=frame), probes, rel)
     except tlmod.TimelineError as exc:
         die(f"--export-timeline: {exc}", kind="input")
     text = tlmod.WRITERS[fmt](tl)
@@ -834,7 +902,7 @@ def main() -> int:
         if "plan_version" in proj:
             return execute_plan(proj, os.path.abspath(args.project))
         base = Path(args.project).resolve().parent
-    validate_project(proj)
+    validate_project(proj, timeline=bool(args.export_timeline), stop_after=args.stop_after)
     if args.write_project:
         # Only the filled project: the point is to edit it before rendering, so nothing runs.
         try:
@@ -1059,9 +1127,21 @@ def main() -> int:
         fit.setdefault("aspect", frame["aspect"])
     if frame.get("fit"):
         fit.setdefault("fit", frame["fit"])
-    if frame.get("width") and len(parts) == 1:
+    # Several clips were joined by join.py: into frame.width x frame.height when the frame gives
+    # both, else at the FIRST clip's aspect. A frame of an aspect and ONE side then reached fit.py
+    # as the aspect alone, which fit.py bounds by the joined picture: {aspect 9:16, width 1080}
+    # over two 16:9 clips rendered 342x608, where one clip (and --export-timeline's sequence) is
+    # 1080x1920. Only that case gets the frame's side. A frame with both sides is already the
+    # join's size, and a project fit object with its own width, height or another aspect renders
+    # as 2.2.1 rendered it: filling the frame's sides in there overrode the fit object's aspect
+    # (fit {width 540} under a 1080x1920 frame came out 540x1920).
+    own = proj.get("fit") or {}
+    one_side = bool(frame.get("width")) != bool(frame.get("height"))
+    sized = len(parts) == 1 or bool(frame.get("aspect") and one_side and not own.get("width") and not own.get("height")
+                                    and own.get("aspect") in (None, frame.get("aspect")))
+    if frame.get("width") and sized:
         fit.setdefault("width", frame["width"])
-    if frame.get("height") and len(parts) == 1:
+    if frame.get("height") and sized:
         fit.setdefault("height", frame["height"])
     if frame.get("fps") and len(parts) == 1:
         fit.setdefault("fps", frame["fps"])

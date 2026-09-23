@@ -252,6 +252,28 @@ class EditingTests(MediaFixtures):
         self.assertClose(m["duration"], 4.0, 0.15)
         self.assertEqual(m["video"]["width"], m["video"]["height"])
 
+    def test_fit_aspect_reads_each_side_as_2_2_1_did(self):
+        """fit.py --aspect reads each side with int(), as 2.2.1 did: 2.2.2's shared parser briefly
+        refused `+9:16` and `1_6:9`, which int() takes, and `0:9`, which 2.2.1 ran as no aspect
+        (the source frame). A patch release refuses nothing fit.py took."""
+        from fractions import Fraction
+        from _common import aspect_ratio
+        self.assertEqual(aspect_ratio("+9:16"), Fraction(9, 16))
+        self.assertEqual(aspect_ratio("1_6:9"), Fraction(16, 9))
+        self.assertEqual(aspect_ratio(" 16 : 9 "), Fraction(16, 9))
+        self.assertEqual(aspect_ratio("0:9"), Fraction(0))
+        for bad in ("16/9", "2.39:1", "16:0", "wide", "1:2:3"):
+            self.assertIsNone(aspect_ratio(bad), bad)
+        # self.src is 1280x720: 9:16 bounded by its height is 406x720. A zero ratio is no aspect,
+        # so --width alone is a square, as 2.2.1 (whose else-branch took the width) made it
+        for aspect, extra, size in (("+9:16", (), (406, 720)), ("0:9", ("--width", "640"), (640, 640))):
+            with self.subTest(aspect):
+                out = OUT / f"fit_asp_{aspect.strip('+').replace(':', '_')}.mp4"
+                doc = json.loads(script("fit.py", self.src, "--aspect", aspect, *extra, "-o", out, "--fast", "--json", "--overwrite").stdout)
+                self.assertEqual(doc["status"], "completed")
+                m = probe(str(out))
+                self.assertEqual((m["video"]["width"], m["video"]["height"]), size)
+
     def test_fit_aspect_only_never_upscales_past_source_resolution(self):
         """With only --aspect given (no --width/--height), the "elif ratio and src_ratio" branch
         used to bound a narrower/taller target by the source's WIDTH, not its height -- so a
@@ -982,6 +1004,105 @@ class EditingTests(MediaFixtures):
         doc = json.loads(script("join.py", d / "line1.wav", d / "line2.wav", "--transition", "none",
                                 "--json", "-o", d / "clean.wav").stdout)
         self.assertEqual(doc["skipped"], [])
+
+    def test_join_dry_run_plans_on_pending_segments(self):
+        """Under --dry-run a segment that does not exist yet is an earlier step's output. Its
+        probe is the dry-run stub, whose (0x0) video stream used to decide the mode: one pending
+        TTS line failed the plan with "tts_01.wav has no video stream while tts_03.wav has one",
+        and a list of nothing but pending .wav lines planned a libx264 join into voice.wav. A
+        pending segment's extension now stands in for its streams, rate and layout come from the
+        segments that exist, and it is planned on and named under `pending` -- never `skipped`
+        -- in both --on-missing modes; a real run still decides on the file as it then is."""
+        d = OUT / "join_pending"
+        d.mkdir(exist_ok=True)
+        for i in (1, 2):
+            sh("ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-f", "lavfi",
+               "-i", f"sine=frequency={300 * i}:sample_rate=24000", "-t", "1.5", d / f"tts_0{i}.wav")
+        for gone in ("tts_03.wav", "intro.mp4", "later.wav"):
+            (d / gone).unlink(missing_ok=True)  # what the earlier steps have not written yet
+        (d / "parts.txt").write_text("tts_01.wav\ntts_02.wav\ntts_03.wav\n", encoding="utf-8")
+        # the pending line first as well: the stub's (unmeasured) rate and layout must not become the plan's
+        (d / "first.txt").write_text("tts_03.wav\ntts_01.wav\ntts_02.wav\n", encoding="utf-8")
+        for lst, at in (("parts.txt", 2), ("first.txt", 0)):
+            for mode, then in (("fail", "refuses the join if one is still missing"), ("skip", "skips one that is still missing")):
+                proc = script("join.py", "--list", d / lst, "--transition", "none", "--on-missing", mode,
+                              "--dry-run", "--json", "-o", d / "voice_plan.wav")
+                doc = json.loads(proc.stdout)
+                case = f"{lst} --on-missing {mode}"
+                self.assertEqual((doc["status"], doc["mode"], doc["clips"]), ("completed", "audio", 3), case)
+                self.assertEqual((doc["sample_rate"], doc["channels"]), (24000, 1), f"{case}: planned from the segments that exist, not the stub")
+                self.assertEqual([(p["index"], Path(p["path"]).name) for p in doc["pending"]], [(at, "tts_03.wav")], case)
+                self.assertEqual(doc["skipped"], [], f"{case}: a pending segment is planned on, not left out")
+                self.assertIsNone(doc["expected_duration"], f"{case}: the pending line's length is unknown, not 0 s")
+                self.assertIn("tts_03.wav", doc["commands"][0])
+                self.assertNotIn("libx264", doc["commands"][0])
+                self.assertTrue(any("tts_03.wav" in n and f"a real run {then}" in n for n in doc["notes"]), doc["notes"])
+                self.assertIn("tts_03.wav does not exist yet", proc.stderr)
+        self.assertFalse((d / "voice_plan.wav").exists())
+        # skipping the pending line would leave one input: the note predicts the refusal the real run gives
+        (d / "two.txt").write_text("tts_01.wav\ntts_03.wav\n", encoding="utf-8")
+        doc = json.loads(script("join.py", "--list", d / "two.txt", "--transition", "none", "--on-missing", "skip",
+                                "--dry-run", "--json", "-o", d / "two.wav").stdout)
+        self.assertEqual(doc["status"], "completed")
+        self.assertTrue(any("refuses the join if that leaves fewer than two inputs" in n for n in doc["notes"]), doc["notes"])
+        proc = script("join.py", "--list", d / "two.txt", "--transition", "none", "--on-missing", "skip",
+                      "--json", "-o", d / "two.wav", expect_fail=True)
+        self.assertIn("nothing to join", json.loads(proc.stdout)["error"]["message"])
+        # a pending .mp4 is expected to hold a picture: next to measured audio it is the mix a real
+        # run refuses, and a pending .wav next to measured video likewise
+        for inputs, out, says in (((d / "tts_01.wav", d / "intro.mp4"), "mix.wav",
+                                   "tts_01.wav has no video stream while " + str(d / "intro.mp4") + ", which does not exist yet, is expected to have one"),
+                                  ((self.src, d / "later.wav"), "mix.mp4",
+                                   str(d / "later.wav") + " does not exist yet, and its audio extension says it will have no video stream while " + str(self.src) + " has one")):
+            proc = script("join.py", *inputs, "--transition", "none", "--dry-run", "--json", "-o", d / out, expect_fail=True)
+            err = json.loads(proc.stdout)["error"]
+            self.assertEqual(err["kind"], "input")
+            self.assertIn(says, err["message"])
+        # a mix names the input measured to have a picture, never a pending file as if it had one
+        (d / "mixed.txt").write_text(f"tts_01.wav\nnot_yet.mp4\n{self.src}\n", encoding="utf-8")
+        proc = script("join.py", "--list", d / "mixed.txt", "--dry-run", "--json", "-o", d / "mixed.mp4", expect_fail=True)
+        err = json.loads(proc.stdout)["error"]
+        self.assertEqual(err["kind"], "input")
+        self.assertIn(f"while {self.src} has one", err["message"])
+        self.assertNotIn("not_yet.mp4", err["message"])
+        # nothing written yet at all: the extensions decide, and .wav plans an audio join
+        (d / "later.txt").write_text("gen_01.wav\ngen_02.wav\n", encoding="utf-8")
+        doc = json.loads(script("join.py", "--list", d / "later.txt", "--dry-run", "--json", "-o", d / "later.wav").stdout)
+        self.assertEqual((doc["mode"], len(doc["pending"]), doc["expected_duration"]), ("audio", 2, None))
+        self.assertFalse(any("libx264" in c for c in doc["commands"]), doc["commands"])
+        self.assertIn("acrossfade", doc["commands"][0])
+        self.assertTrue(any("file extensions" in n for n in doc["notes"]), doc["notes"])
+        # every audio extension this skill reads counts, not only the ones it writes: a pending
+        # .aiff (macOS `say -o`) was taken for a file with a picture and the plan refused as a mix
+        for i in (1, 2):
+            sh("ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-f", "lavfi",
+               "-i", f"sine=frequency={300 * i}:sample_rate=24000", "-t", "1.5", d / f"say_0{i}.aiff")
+        (d / "say_03.aiff").unlink(missing_ok=True)
+        (d / "say.txt").write_text("say_01.aiff\nsay_02.aiff\nsay_03.aiff\n", encoding="utf-8")
+        doc = json.loads(script("join.py", "--list", d / "say.txt", "--dry-run", "--json", "-o", d / "say.wav").stdout)
+        self.assertEqual((doc["status"], doc["mode"], len(doc["pending"])), ("completed", "audio", 1))
+        (d / "say_new.txt").write_text("new_01.aiff\nnew_02.caf\n", encoding="utf-8")
+        doc = json.loads(script("join.py", "--list", d / "say_new.txt", "--dry-run", "--json", "-o", d / "say.wav").stdout)
+        self.assertEqual(doc["mode"], "audio", "nothing written yet: .aiff and .caf plan an audio join")
+        # a pending FIRST clip of a video join: its stub is unmeasured, so the planned frame, rate
+        # and xfade offsets built on it are named as placeholders, and the audio layout comes
+        # from the clips that exist (the stub's 0 channels made a mono join stereo)
+        (d / "cam_later.mp4").unlink(missing_ok=True)
+        proc = script("join.py", d / "cam_later.mp4", self.src, self.src, "--dry-run", "--json", "-o", d / "cams.mp4")
+        doc = json.loads(proc.stdout)
+        self.assertEqual((doc["status"], doc["mode"]), ("completed", "video"))
+        self.assertTrue(any("first input is pending" in n and "placeholders" in n for n in doc["notes"]), doc["notes"])
+        self.assertTrue(any("xfade offsets" in n for n in doc["notes"]), doc["notes"])
+        self.assertIn("channel_layouts=mono", doc["commands"][0])
+        self.assertNotIn("channel counts differ", proc.stderr)
+        doc = json.loads(script("join.py", self.src, self.src, d / "cam_later.mp4", "--dry-run", "--json", "-o", d / "cams.mp4").stdout)
+        self.assertFalse(any("placeholders" in n or "xfade offsets" in n for n in doc["notes"]),
+                         "a pending LAST clip changes neither the frame nor an offset")
+        # the real run is unchanged: the missing line is skipped (or refused), never pending
+        doc = json.loads(script("join.py", "--list", d / "parts.txt", "--transition", "none", "--on-missing", "skip",
+                                "--json", "-o", d / "voice.wav").stdout)
+        self.assertEqual((doc["clips"], doc["pending"], doc["expected_duration"]), (2, [], 3.0))
+        self.assertEqual([Path(p["path"]).name for p in doc["skipped"]], ["tts_03.wav"])
 
     def test_join_audio_only_inputs(self):
         """WAV + M4A + MP3 of different rates and channel counts join as audio; video containers and mixed inputs are refused."""

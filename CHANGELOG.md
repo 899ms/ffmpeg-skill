@@ -4,7 +4,82 @@
 
 ## Unreleased
 
-(nothing yet)
+- `join.py --dry-run` no longer fails a plan because one of its inputs is not written yet. The
+  pending file's placeholder probe always claimed a video stream, so a TTS list with one line
+  still to come was refused as an audio/video mix ("tts_01.wav has no video stream while
+  tts_03.wav has one"), a list of nothing but pending `.wav` lines planned a libx264 join into
+  `voice.wav`, and a `render.py --dry-run` of an audio project with one trimmed and one untrimmed
+  clip failed at the join. A pending input's extension now stands in for its streams: any
+  audio extension the skill reads (`.wav`, `.m4a`, `.aiff`, `.caf`, ...) means no picture. A
+  join's audio rate and layout come from the inputs that exist, and each pending input is
+  named -- a stderr note, the new `pending` key and `notes` -- instead of being passed over in
+  silence. A pending `.mp4` next to a measured `.wav` is still refused as the mix a real run
+  refuses, now naming the `.wav` and the file expected to hold a picture. With either
+  `--on-missing` a dry run plans on a pending input and never lists it under `skipped`; a real
+  run still refuses or skips a file that is missing when it runs, and under `skip` the note
+  says when skipping would leave fewer than two inputs, which a real run refuses.
+  `expected_duration` is `null` while an input is pending: the placeholder's 0 s made it negative,
+  or shorter than the one clip that exists. In a video join, `notes` also says when the planned
+  frame and rate (a pending first input) or xfade offsets (after a pending input) are the
+  placeholder's unmeasured values. Real runs are unchanged.
+- `render.py --export-timeline` writes FCPXML that validates against Apple's FCPXML 1.10 DTD:
+  the music bed now comes before the chapter markers inside the first clip (the DTD's order is
+  `timeMap`, connected clips, markers). 2.1.0-2.2.1 wrote them the other way round, which does
+  not validate -- and Final Cut validates what it imports against that DTD.
+- `--export-timeline` reads clip `in`/`out` and chapter times the way the render does (`"0:05"`,
+  `hh:mm:ss:ff` at the source's fps, `@fps`). Before, any string time was a Python traceback
+  with nothing on stdout under `--json` -- including the `"in": "0:00"` of `render.py --init`'s
+  own starter project. A time that does not parse is now a `kind: input` failure naming the
+  field (`clips[0].in`). A clip with no picture has no fps of its own, and `frame.fps` does not
+  stand in for one in either path: its `hh:mm:ss:ff` needs `@fps`, as `cut.py` asks.
+- `render.py` refuses, as `kind: input` naming the key, a value that is not an object where
+  the run reads it. 2.2.1 died there with a traceback and nothing on stdout under `--json`. In
+  the render and `--export-timeline` alike, that covers a string `frame`, a clip written as a
+  bare path, a clip with no `src`, a string `audio` and a string `transition` between two or
+  more clips. In the render it also covers every stage section (`"export": "reels"`,
+  `"captions": "subs.srt"`) and the `snap` of a clip it cuts, up to the `--stop-after`
+  stage (a `--stop-after fit` preview never reads `captions`). Nothing a full run never reads is
+  refused. A single clip's `"transition": "none"` and an uncut clip's `snap` still render and
+  export. `--export-timeline` still writes a timeline for a stage section that is not an
+  object and lists it in `not_exported`, as 2.2.1 did.
+- The exported sequence is the frame the project asks for, sized by fit.py's own rule:
+  `frame: {aspect: "16:9", width: 1920}` is 1920x1080 over any source (it was 1920x2160 over a
+  4K one, the height taken from the source). An aspect-only frame takes the export preset's
+  size when the preset has that aspect, as the render's does. fit.py now sizes its output with
+  the same shared function (`frame_size()`) and reads `--aspect` with the same parser
+  (`aspect_ratio()`), which reads each side with `int()` as fit.py did, so fit.py accepts and
+  sizes every `--aspect` exactly as 2.2.1 did. The export now refuses a `frame.aspect` of `16/9`
+  or `2.39:1` when the render would hand it to fit.py, which refuses it too. The render's own preset match
+  (`frame_from_preset()`) keeps 2.2.1's looser reading, so a `16/9` frame replaced by the
+  project's `fit.aspect` renders exactly as before, and the export writes its frame.
+- A render of several clips delivers that frame too. When the frame gives an aspect and one
+  side, and the project's `fit` object gives no width, height or other aspect, `render.py`
+  now gives fit.py that side. Before, join.py sized the join at the first clip's aspect and
+  fit.py fitted the new aspect inside it: `{aspect: "9:16", width: 1080}` (`render.py`'s own
+  docstring frame) over 16:9 clips came out 342x608 -- the delivered size without an export
+  preset, and the size captions were burned at with one. Every other multi-clip project renders
+  at the size 2.2.1 rendered.
+- FCPXML describes each video asset as its own source (size and frame rate) and the sequence
+  as the frame; one shared format made a 320x180 file under a 9:16 frame claim to be
+  1080x1920. A clip of another aspect states its spatial conform, `adjust-conform` `fill` for
+  `frame.fit: crop` and `fit` for pad; the DTD reads a missing one as fit, so a crop project
+  was exported as a fit. EDL and OTIO cannot state a conform, so there the reframe is listed in
+  `not_exported` with the project's `frame.fit`, as is `blur`'s blurred background in all three.
+
+- Known, carried into a minor release (`docs/design-decisions.md` records each one):
+  - A multi-clip render with `frame.fit: crop` keeps bars on every clip of another aspect than
+    the joined frame, even when all the clips share one aspect: join.py pads the clips into
+    the frame before fit.py crops. The exported timeline states `fill`, the project's choice.
+  - A project `fit` object with its own width, height or aspect is still fitted inside a
+    multi-clip join's picture, as in 2.2.1 (`fit {aspect 4:5}` under `{aspect 9:16, width 72}`
+    renders 32x40 against a 72x128 sequence). Which of `frame` and `fit` wins waits for that
+    release.
+  - For a value that is not an object in a section a path never reads, the export and the
+    render can still disagree, as in 2.2.1. Refusing it in both paths would refuse projects
+    2.2.1 rendered or exported.
+  - `batch.py` names every intermediate of a `.ogg`, `.opus`, `.aac`, `.aif`/`.aiff`, `.caf`
+    or `.wma` source `.mp4`, so a `--dry-run` of a join step over those sources is refused as
+    an audio/video mix that the real batch completes (as in 2.2.1).
 
 ## 2.2.1
 

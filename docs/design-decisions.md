@@ -31,6 +31,33 @@ exists. When a decision changes, edit the entry in the same PR.
 - **When a measured input is an intermediate an earlier dry-run stage would have written**
   (render/batch plans), the measurement is skipped with a note rather than failing the plan.
   Code: `_common.dry_run_input_pending()`.
+- **`join.py --dry-run` plans on an input that does not exist yet, whatever `--on-missing`
+  says.** The file is taken for an earlier step's output (render's cut clips, a TTS line): it
+  stays in the planned command and is named under `pending` and in `notes`, never under
+  `skipped`, which in a dry run as in a real run holds only what the join left out. A real run
+  decides on the file as it then is: refused under `fail`, skipped under `skip` -- and refused
+  under `skip` too when skipping leaves fewer than two inputs, which the note then says. Its
+  probe is the dry-run stub, whose video stream means nothing, so its extension stands in: an
+  audio extension -- any this skill reads (`_common.AUDIO_MEDIA_EXT`: `.wav`, `.m4a`, `.aiff`,
+  `.caf`, ...), not only the ones it writes -- is taken for a file with no picture, any other
+  for one with a picture, and the measured and pending inputs meet the rules a real run applies
+  (all without a picture: an audio join; a mix: refused, naming a measured picture before a
+  pending one). The guess can be wrong -- an `.mp4` holding only audio is refused as a mix a
+  real run would have joined as audio, and batch.py names every intermediate of a `.ogg`,
+  `.opus`, `.aac`, `.aif`/`.aiff`, `.caf` or `.wma` source `.mp4`, so a dry run of a batch join
+  step over those sources is refused where the real batch completes (batch.py keeps the
+  source's extension only for `.wav`, `.mp3`, `.m4a` and `.flac`; widening that changes the
+  container a real run writes, and waits for a minor release) -- but a plan that completes and
+  a real run that then refuses the mix, after the earlier steps ran, is the worse error. A
+  join's audio rate and layout come from the inputs that exist, and `expected_duration` is null
+  while any input is pending: the stub's 0 s would count the clip as nothing. The video join's
+  planned frame and rate still come from the first input and its xfade offsets from every
+  input's length: a pending first input's frame and rate, and the offsets after a pending
+  input, are the stub's unmeasured 0x0 / 0 s, and the plan's `notes` say they are placeholders
+  rather than borrowing another clip's (#77 made the stub honest instead of plausible). Code:
+  `join.preflight()`, `join.main()`, `join.unpending_length()`.
+  Tests: `test_join_dry_run_plans_on_pending_segments`,
+  `test_render_dry_run_joins_a_trimmed_and_an_untrimmed_audio_clip`.
 - **`verify` accepts `--dry-run` and ignores it.** Its job is to run the tools for real.
   Contract: `_contract.DRY_RUN_NOTES["verify"]`.
 
@@ -579,6 +606,78 @@ not a new file format this tool would have to maintain.
   `timeline.not_exported` and stderr. A caption track or a title in FCPXML would be a second
   implementation of `caption.py`/`graphics.py` whose output no one here can see.
   Test: `test_build_refuses_what_a_timeline_cannot_hold`.
+- **The sequence is the project's frame, sized by fit.py's own rule, and the render delivers
+  that size.** The project's `frame` goes through `frame_from_preset()` (an aspect-only frame
+  takes the export preset's size when the preset has that aspect) and then `frame_size()`, the
+  function fit.py sizes its output with: one side and an aspect give the other, so
+  `{aspect 16:9, width 1920}` is 1920x1080 over any source (2.1.0-2.2.1 took the height from
+  the source: 1920x2160 over 4K). The aspect is read with `aspect_ratio()`, which fit.py now
+  reads `--aspect` with too: two sides split at `:`, each read with `int()` as fit.py read them
+  in 2.2.1 (`+16:9` and `1_6:9` parse, `0:9` is a zero ratio that sizes as no aspect). So the
+  export refuses `16/9` where the render hands it to fit.py, which refuses it too, and fit.py
+  refuses nothing it took in 2.2.1. When the project's own `fit.aspect` replaces it, the render
+  never gives fit.py the frame's aspect and completes, so the export sizes the sequence
+  without it. `frame_from_preset()` keeps 2.2.1's looser match (`16/9`, `1.78:1`) for the
+  preset size: it drops nothing a 2.2.1 render was sized by.
+  A render of several clips gives fit.py the frame's side when the frame gives an aspect and
+  one side, and the project's `fit` object gives no width, height or other aspect. Before,
+  join.py sized the join at the first clip's aspect and fit.py fitted the aspect inside it
+  (`{aspect 9:16, width 1080}` over 16:9 clips rendered 342x608). Every other multi-clip
+  project renders as 2.2.1 rendered it: a frame with both sides is already the join's size,
+  and a `fit` object with its own size or aspect is fitted inside the joined picture
+  (`fit {aspect 4:5}` under `{aspect 9:16, width 72}` over 16:9 clips renders 32x40 against a
+  72x128 sequence, where one clip renders 72x90). Filling the frame's sides in there too
+  overrode the `fit` object (`fit {width 540}` under a 1080x1920 crop frame rendered 540x1920,
+  half the picture cut away). Which of `frame` and `fit` wins is deferred to a minor release.
+  Three render gaps remain, all from join.py sizing the join before fit.py reframes it. (1)
+  With several clips, one side and no aspect, join.py rounds an odd side down where fit.py
+  rounds up (`{width 100}` over 4:3 renders 100x74, the sequence is 100x76). (2) join.py pads
+  every clip into the joined frame before fit.py crops: the frame's own W x H when it gives
+  both sides (as every template frame does after `frame_from_preset()`), else the first clip's
+  aspect. So a multi-clip `frame.fit: crop` render keeps bars on every clip of another aspect
+  than that frame, even when all the clips share one aspect, while the timeline states
+  `fill`, the project's choice (the timeline follows the project, not the render's drift).
+  Passing `frame.fit` to join.py would change rendered output and waits for a minor release.
+  (3) The `fit`-object case above.
+  Tests: `test_sequence_frame_is_the_frame_the_render_delivers`,
+  `test_a_multi_clip_render_delivers_the_sequence_size`,
+  `test_the_export_and_fit_py_read_one_aspect_grammar`,
+  `test_render_frame_aspect_takes_the_export_presets_size`.
+- **A clip of another aspect is a reframe FCPXML states and EDL and OTIO cannot.** FCPXML's
+  `adjust-conform` is written on each such clip, `fill` for `frame.fit: crop` and `fit` for pad
+  (the DTD reads a missing one as fit, so leaving it out exported every crop as a fit). blur
+  has no conform: the clip is fitted, and the blurred background is named in `not_exported`.
+  EDL and OTIO have no field for a conform, so there the reframe is named in `not_exported`
+  with the project's `frame.fit`, and the editor's default decides. Each FCPXML video asset
+  carries its own source's format (size and frame rate) and the sequence the frame's: with one
+  format for both, a 320x180 asset under a 9:16 frame claimed to be 1080x1920.
+  Test: `test_fcpxml_describes_each_source_and_states_the_conform`.
+- **Times are read the way render.py's own stages read them.** `clips[].in`/`out` take
+  `parse_time()`'s grammar at the source's fps, as cut.py reads them. `frame.fps` does not stand
+  in: cut.py has no other fps to use, so a clip with no picture needs `@fps` on an
+  `hh:mm:ss:ff` time in both paths. A chapter's `at` takes no fps, as metadata.py reads it, so
+  `hh:mm:ss:ff` there needs its `@fps` in both paths too. Neither path accepts a time the
+  other refuses. A time that does not parse is `kind: input` (2.1.0-2.2.1 called `float()`,
+  and `--init`'s own `"in": "0:00"` was a traceback).
+  Tests: `test_times_are_read_with_the_render_grammar`,
+  `test_a_bad_time_is_an_input_failure_not_a_traceback`.
+- **A value that is not an object is refused only where the run reads it.**
+  `validate_project()` refuses it as `kind: input`, naming the key, before the first stage.
+  In both paths that covers a string `frame`, a clip written as a bare path, a clip with no
+  `src`, a string `audio` and a string `transition` between two or more clips. In the render
+  it also covers every stage section (`"export": "reels"`, `"captions": "subs.srt"`) and the
+  `snap` of a clip it cuts, up to the `--stop-after` stage: a section read only after it
+  (`"captions": "subs.srt"` under `--stop-after fit`, a string `transition` under
+  `--stop-after clips`) is not refused, as 2.2.1 completed those previews. A full run of each
+  of these died in 2.2.1 with a traceback and nothing on stdout under `--json`. A value
+  the run never reads is left as 2.2.1 left it. That is a single
+  clip's `transition` (a batch.py project recipe that carries join.py's `--transition none`),
+  an uncut clip's `snap`, and, in `--export-timeline`, every section it only lists in
+  `not_exported`. Those projects rendered or exported in 2.2.1, and a patch release does not
+  refuse them. So for these shapes the export can accept a project the render refuses, as in
+  2.2.1. Refusing them in both paths is deferred to a minor release. Code:
+  `render.validate_project()`, `render.require_object()`.
+  Test: `test_a_bad_time_is_an_input_failure_not_a_traceback`.
 - **OTIO's `source_range` is timeline length, with the speed in a `LinearTimeWarp`.** Core
   OTIO does not rescale a clip's duration by its effects; the first version stored the
   speed-scaled source length and the reference `opentimelineio` library (0.18) measured the
@@ -588,5 +687,14 @@ not a new file format this tool would have to maintain.
   All three formats were read back by the reference OTIO library and its FCPXML / CMX 3600
   adapters at the right length, but none of Final Cut, Resolve or Premiere is available in this
   environment, and OTIO's own FCPXML adapter ignores dissolves, markers and retiming, so those
-  parts of the FCPXML are checked only against Apple's schema by hand. The editor round trip is
-  on #143's real-hands checklist.
+  parts of the FCPXML are checked against Apple's FCPXML 1.10 DTD with `xmllint --dtdvalid`, by
+  hand: the DTD ships inside Final Cut, not in this repository, so no test reads it. 2.1.0 made
+  the same claim and its files did not validate: the music bed came after the chapter markers
+  inside the first clip, where the DTD's `asset-clip` holds `timeMap`, then the `adjust-*`
+  elements (`adjust-conform`), then anchored items (the connected music clip), then markers.
+  That order is pinned by `test_fcpxml_spine_matches_the_cut` and
+  `test_fcpxml_keeps_the_dtd_child_order_on_a_retimed_first_clip`. OTIO's FCPXML adapter
+  reads each clip's offset at its asset's frame rate and compares the frame counts across
+  rates, so a project mixing source rates reads back there with gaps the file does not have
+  (the file's offsets are rational seconds). The editor round trip is on #143's real-hands
+  checklist.

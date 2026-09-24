@@ -64,10 +64,16 @@ exists. When a decision changes, edit the entry in the same PR.
 ## Colour
 
 - **A BT.2020-primaries stream is routed through the HDR (10-bit HEVC, tags preserved) path even
-  when its transfer is SDR.** `probe` reports `hdr: true` with `hdr_format: "BT.2020 SDR"` for
-  it. The alternative -- 8-bit BT.709 x264 -- would clip the wide gamut without a conversion.
-  Changing the meaning of `hdr` is a 1.x contract change and waits for 2.0. Code:
-  `_common.probe()` (`hdr = ...`), `_common.video_args()` docstring.
+  when its transfer is SDR.** `probe` reports it as `hdr: false`, `bt2020_or_hdr: true`,
+  `hdr_format: "BT.2020 SDR"` (see "`hdr` is a real HDR signal" below); the editing tools route
+  on `bt2020_or_hdr`. The alternative -- 8-bit BT.709 x264 -- would clip the wide gamut without a
+  conversion. Code: `_common.probe()`, `_common.video_args()` docstring.
+- **`color.py --to-sdr` converts such a stream's gamut without a tone map.** It is already SDR:
+  linearised with its own transfer, mapped to BT.709 primaries and re-encoded with the BT.709
+  transfer, white and grey stay where they were. The tone map is kept for PQ, HLG, Dolby Vision
+  and `--force` on an untagged file; through 2.2.2 it ran on BT.2020 SDR too and darkened white
+  from Y 235 to 151. The result says which path ran (`sdr_path`, `notes`). Code:
+  `color.is_bt2020_sdr()`. Test: `test_to_sdr_bt2020_sdr_converts_gamut_without_tonemap`.
 - **`escape_drawtext()` drops `'` and `%` from burnt-in text** instead of escaping them. Both
   characters have no reliable escape across the FFmpeg versions in CI; a missing apostrophe is a
   known limitation, a broken filter graph is not. Test: `test_drawtext_semicolon_and_quote_render_as_inert_literal_text`.
@@ -596,11 +602,13 @@ not a new file format this tool would have to maintain.
   `render.export_timeline()`, `_common/timeline.py`.
 - **The timeline matches the project's numbers, not a render's.** A dissolve is centred on
   each cut and trimmed `trim_head`/`trim_tail` frames either side, so the total is the sum of the
-  clip lengths minus one transition per join -- what `join.py`'s xfade renders by design. A real
-  render can come out a few frames longer, because `join.py` offsets each crossfade by the
-  part's *container* duration (audio priming included); that is render's drift, recorded as a
-  follow-up, and copying it into the timeline would hand an editor a cut nobody asked for.
-  Test: `test_build_centres_each_dissolve_and_keeps_the_rendered_length`.
+  clip lengths minus one transition per join -- what `join.py`'s xfade renders by design. Since
+  the Unreleased fix after 2.2.2, `join.py` offsets each crossfade by the part's video-stream
+  length (its audio's only when the sound runs more than a frame past the picture), no longer
+  the *container* duration with its audio priming, so a render matches this total to the frame.
+  Tests: `test_build_centres_each_dissolve_and_keeps_the_rendered_length`,
+  `test_join_dissolve_of_short_parts_keeps_the_frame_count`,
+  `test_join_transition_keeps_each_clips_sound_with_its_picture`.
 - **What a timeline cannot carry is reported, never dropped.** Captions, graphics, overlays,
   the silence cut, fit, audio processing, loudness and the export preset go to
   `timeline.not_exported` and stderr. A caption track or a title in FCPXML would be a second

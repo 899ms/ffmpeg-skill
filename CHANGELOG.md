@@ -4,6 +4,12 @@
 
 ## Unreleased
 
+(nothing yet)
+
+## 2.2.3
+
+_Automated release: version and notes generated from pull requests merged since 2.2.2._
+
 - `color.py --to-sdr` no longer tone-maps BT.2020 SDR input. A file with BT.2020 primaries on
   an SDR transfer (bt709, bt2020-10) went through the PQ tone map, which took white from Y 235
   to 151 and mid-grey from 126 to 90 and still reported `verified: true` -- and export, check,
@@ -20,6 +26,7 @@
   AAC tail. `verified` now includes a `duration` step comparing the output's video-stream length
   with `expected_duration`, and `probe` reports each stream's own `duration`. The audio-only
   join and `--transition none` build the same commands as before.
+- fix: color --to-sdr keeps BT.2020 SDR bright; crossfaded joins keep sound with picture (#291)
 
 ## 2.2.2
 

@@ -338,8 +338,10 @@ sticker template and `--srt`/`--text` burns captions by running caption.py
 afterwards -- both as second processes, so neither of those code paths is
 re-implemented here. `--image` must be a readable local file: a URL is refused
 (`kind: input`), nothing is fetched, and the skill never invents cover art --
-give an image or a colour. Without any of these flags the command line is
-byte-identical to 1.15's. Every run's result carries an `audiogram` object (style,
+give an image or a colour. The title and caption stages receive `--overwrite`, `--timeout`,
+`--fast` and `--dry-run`, and a failed stage reports that tool's own error kind; a missing
+`--srt`/`--text` file is refused (`kind: input`) before anything is encoded. Without any of
+these flags the command line is byte-identical to 1.15's. Every run's result carries an `audiogram` object (style,
 background, image, position, vis_height, platform, captions, title, stages,
 verified). `render.py --template audiogram` is the one-call form; it is
 deliberately not part of `--template all`.
@@ -1053,6 +1055,13 @@ caption.py INPUT --srt FILE[:LANG] | --ass FILE | --text CUES.txt [--write-srt O
            [--emoji auto|color|png|mono|none] [--emoji-assets DIR] [--emoji-scale 1.0] [--emoji-max 60] [-o OUT]
 caption.py --text CUES.txt --write-srt OUT.srt        # generate the SRT only
 ```
+**Side files and `--overwrite` (2.2.4).** The files caption.py writes besides the
+video -- the `.srt` from `--text`/`--transcribe` (or `--write-srt`), the generated
+`.ass` (or `--write-ass`), `<output>_adjusted.srt`, `<output>_offset.ass` -- are
+refused like the video when they already exist, all named together, before speech
+recognition and before the first write, dry runs included; `--overwrite` replaces
+them. A hand-corrected transcript next to the output is never replaced silently.
+
 **Caption margins (1.17.2).** `--margin` is the **vertical** distance from the
 edge, in ASS units against the 288-line script grid (default 30; with
 `--platform` it becomes that destination's `safe.top`/`safe.bottom`, e.g. 22 %
@@ -1388,6 +1397,9 @@ threshold ducks on quieter speech, a shorter release brings the bed back faster.
 `--json`'s `audio` block reports the settings the run actually used.
 `--effects FILE` mixes a third track (sound effects, atmos) at
 `--effects-volume` and is never ducked — effects are cut to the picture.
+Every `--music` / `--effects` / `--replace` file is checked before ffmpeg runs (under
+`--dry-run` too): missing, empty, unreadable or with no audio stream, all of them are named in
+one refusal (`kind: input`, `problems: [{flag, path, reason}]`).
 `--stereo-widen 0..1` widens the stereo image (`extrastereo=m=1+2*amount`) and
 needs a real stereo source: it scales the side signal (L−R), so a mono track
 duplicated to two channels has nothing to scale. A 1-channel input is refused

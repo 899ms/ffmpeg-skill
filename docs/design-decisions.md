@@ -95,6 +95,13 @@ exists. When a decision changes, edit the entry in the same PR.
   copy-then-re-encode fallbacks) is never someone else's file. Code:
   `_common._check_existing_output()`. Test:
   `test_existing_output_is_refused_without_overwrite_and_never_for_its_own_files`.
+  Side files count as outputs (2.2.4): caption.py checks the video and every `.srt`/`.ass` it
+  will write (`--text`/`--transcribe`/`--write-srt`, generated or `--write-ass` ASS,
+  `_offset.ass`) together before speech recognition and the first write; an `_adjusted.srt` or
+  emoji-forced ASS, known only once the cues are laid out, is checked where it is written, still
+  before that write. Through 2.2.3 a hand-corrected transcript was replaced on a re-run. Code:
+  `_common.refuse_existing_outputs()`. Test:
+  `test_caption_sidecars_are_refused_like_the_video_without_overwrite`.
 - **An existing output is written through a hidden sibling temp file and replaced only on
   success**, so a failed run never costs the caller the file that was there (FFmpeg 5.x truncates
   the output before a filter error). The temp name `.<stem>.ffskill-<pid><ext>` is expected in the
@@ -380,6 +387,16 @@ files by `test_docs_tool_count_matches_the_real_tool_list`. Do not re-propose it
 `graphics.py --template sticker` and `--srt`/`--text` runs `caption.py` on the rendered file,
 rather than adding drawtext or an ASS path here. One code path per job is worth two process
 spawns; the alternative is a second subtitle renderer that drifts from the first.
+Since 2.2.4 they are launched as `render.py` launches its stages: `run_tool()` with
+`child_args()` and `--json`, so `--overwrite`, `--timeout`, `--fast` and `--dry-run` reach
+them, and a failed stage is re-raised with the child's own kind, exit code and hint (a private
+launcher had forwarded only `--dry-run` and called every failure `kind: ffmpeg`). The `_vis` /
+`_titled` intermediates are removed on the failure path too, and a missing `--srt`/`--text`
+is refused before the visualisation is encoded. Under `--dry-run` only, `--title` passes
+graphics.py an explicit `--end` (the source's duration) because the `_vis` file it would probe
+was never written; a real run's commands are unchanged. Tests:
+`test_waveform_srt_and_title_rerun_with_overwrite`, `test_waveform_title_dry_run_completes`,
+`test_waveform_missing_srt_is_input_before_any_encode`.
 
 **`--auto-chapters` lives in `metadata.py`, and the detectors moved into `_common`.**
 `metadata.py` already owns the chapter format, the `-c copy` graph and the written-vs-asked-for
@@ -706,3 +723,18 @@ not a new file format this tool would have to maintain.
   rates, so a project mixing source rates reads back there with gaps the file does not have
   (the file's offsets are rational seconds). The editor round trip is on #143's real-hands
   checklist.
+
+
+## 2.2.4 — the first bad input, named
+
+- **Every bad extra input is refused together, before ffmpeg runs.** The same rule 2.2.0/2.2.1
+  gave `join.py` and `render.py`: `audio.py` checks every `--replace` / `--music` / `--effects`
+  file (missing, empty, unreadable, or no audio stream) and names all of them in one
+  `kind: input` refusal with `problems: [{flag, path, reason}]`, under `--dry-run` too (a file
+  that does not exist yet stays pending, as in join.py). `render.py`'s real run now adds the
+  ffprobe readability check to its clip-source preflight, so every unreadable source is named at
+  once, as its dry run already did through join; the dry run itself is unchanged. `sync.py` and
+  `multicam.py` name the file that is too short to analyse. No success path's command line
+  changed. Tests: `test_audio_beds_without_audio_are_refused_together`,
+  `test_render_real_run_names_every_unreadable_clip_source`, `test_sync_too_short_names_the_file`,
+  `test_multicam_too_short_names_the_file`.

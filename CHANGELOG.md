@@ -4,7 +4,26 @@
 
 ## Unreleased
 
-(nothing yet)
+- **caption.py: an existing `.srt`/`.ass` side file is refused without `--overwrite`**, like the
+  video. Through 2.2.3 only ffmpeg's output was checked: `--transcribe` warned and then replaced
+  a hand-corrected transcript, and `--text`, `--write-srt` alone, the generated/`--write-ass`
+  ASS, `_adjusted.srt` and `_offset.ass` were overwritten without a word -- even by a run that
+  was then refused for the existing video. Every file the run will write is now checked up
+  front (kind `input`, each existing one named), before speech recognition starts and before
+  the first write; the dry run predicts the same refusal. New `_common.refuse_existing_outputs()`.
+- **waveform.py: `--title` and `--srt`/`--text` stages get the shared flags.** graphics.py and
+  caption.py are now launched with `--overwrite`, `--timeout`, `--fast` and `--dry-run`
+  forwarded (as render.py's stages are), so a second run with `--overwrite` no longer fails in
+  the caption or title stage. A failed stage keeps the child's own kind and hint instead of
+  always `kind: ffmpeg`; the `_vis`/`_titled` intermediates are removed on failure too; a
+  missing `--srt`/`--text` file is `kind: input` before anything is encoded; and
+  `--title --dry-run` completes.
+- **audio.py:** `--music`, `--effects` and `--replace` files that are missing, empty, unreadable
+  or have no audio stream are refused together in one `kind: input` failure with
+  `problems: [{flag, path, reason}]`, before ffmpeg runs (dry run included).
+- **render.py:** a real run names every unreadable clip source in its preflight refusal, not
+  only the first one.
+- **sync.py / multicam.py:** "not enough audio to analyse" now names the file.
 
 ## 2.2.3
 

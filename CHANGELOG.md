@@ -4,10 +4,17 @@
 
 ## Unreleased
 
+(nothing yet)
+
+## 2.2.5
+
+_Automated release: version and notes generated from pull requests merged since 2.2.4._
+
 - SKILL.md and README: `multicam.py --edl` is a plain cut list, not an EDL an editor opens. The multicam
   row now routes "for Premiere/Resolve" through `--write-project p.json` then `render.py --export-timeline`, and
   the "open it in Premiere / Resolve / Final Cut" row says to write a project first when there is none (found
   reading the eval-25 tl2 prompt).
+- fix: route "timeline for Premiere" from multicam through --write-project; add eval 25 kit (#293)
 
 ## 2.2.4
 

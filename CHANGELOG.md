@@ -4,6 +4,12 @@
 
 ## Unreleased
 
+(nothing yet)
+
+## 2.2.4
+
+_Automated release: version and notes generated from pull requests merged since 2.2.3._
+
 - **caption.py: an existing `.srt`/`.ass` side file is refused without `--overwrite`**, like the
   video. Through 2.2.3 only ffmpeg's output was checked: `--transcribe` warned and then replaced
   a hand-corrected transcript, and `--text`, `--write-srt` alone, the generated/`--write-ass`
@@ -24,6 +30,7 @@
 - **render.py:** a real run names every unreadable clip source in its preflight refusal, not
   only the first one.
 - **sync.py / multicam.py:** "not enough audio to analyse" now names the file.
+- fix: caption never overwrites sidecars silently; waveform, audio, sync and render name every bad input (#292)
 
 ## 2.2.3
 

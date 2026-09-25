@@ -58,6 +58,17 @@ exists. When a decision changes, edit the entry in the same PR.
   `join.preflight()`, `join.main()`, `join.unpending_length()`.
   Tests: `test_join_dry_run_plans_on_pending_segments`,
   `test_render_dry_run_joins_a_trimmed_and_an_untrimmed_audio_clip`.
+- **`join.py --on-silent` defaults to `warn`, not `fail`, at a -50 dBFS peak.** Deliberate
+  silence exists: a beat of room tone between lines, a music bed's silent intro, a clip whose
+  camera audio is to be replaced later. Refusing those by default would break joins that worked
+  in 2.2.5, so the default only names the input (`silent`, `notes`, stderr) and a pipeline that
+  knows every segment must speak -- TTS lines -- opts into `fail` or `skip`. The measure is the
+  whole-file peak, not the mean or loudness: a failed TTS file is digital silence (volumedetect
+  reports -91 dBFS) and any real speech peaks far above -50 dBFS even when quiet, while a noisy
+  room-tone take can still peak above it and is then (correctly) not called silent; a mean or
+  LUFS gate would flag quiet but real narration. An input with no audio stream is never silent
+  (the join adds silence for it on purpose), and an unmeasurable level is left to the join.
+  Code: `join.find_silent()`, `join.main()`. Test: `test_join_on_silent_names_a_silent_segment`.
 - **`verify` accepts `--dry-run` and ignores it.** Its job is to run the tools for real.
   Contract: `_contract.DRY_RUN_NOTES["verify"]`.
 
@@ -725,6 +736,21 @@ not a new file format this tool would have to maintain.
   checklist.
 
 
+## Unreleased — captions that can be seen
+
+- **A burn that draws nothing is a refusal, not a warning.** `caption.py` counts the non-blank
+  cues overlapping `[0, duration]`; none (a cue file timed for a longer cut, all-blank text, an
+  `--ass` without `Dialogue` lines) is `kind: input`, because the output would be the input
+  re-encoded and `verified: true` would be false at the layer a caller reads. Some cues outside
+  is only a warning with `cues_outside`: trimming a clip out of a longer transcript is normal.
+  With no probed duration every non-blank cue counts as drawn. `--mode mux` is not checked; a
+  soft track draws nothing by itself. Tests: `test_caption_refuses_cues_that_are_never_visible`,
+  `test_caption_reports_cues_burned_and_outside`, `test_waveform_srt_outside_the_render_is_refused_as_input`.
+- **Whitespace-only text flags are missing, not text.** `graphics.py` maps a blank
+  `--title`/`--name`/`--subtitle`/`--text`/`--top`/`--bottom` to unset before the template's own
+  "needs --title" check; non-blank text is drawn exactly as given (not stripped). `overlay.py
+  --text "  "` is refused. Test: `test_graphics_and_overlay_refuse_blank_text`.
+
 ## 2.2.4 — the first bad input, named
 
 - **Every bad extra input is refused together, before ffmpeg runs.** The same rule 2.2.0/2.2.1
@@ -738,3 +764,53 @@ not a new file format this tool would have to maintain.
   changed. Tests: `test_audio_beds_without_audio_are_refused_together`,
   `test_render_real_run_names_every_unreadable_clip_source`, `test_sync_too_short_names_the_file`,
   `test_multicam_too_short_names_the_file`.
+
+
+## 2.2.6 — silence is reported, not verified
+
+- **A silent track warns by default, and refuses only on request.** `audio.py` measures the
+  whole-file peak of each `--music` / `--replace` / `--effects` file and, under `--duck`, the
+  voice. Default `--on-silent warn` still mixes it (a deliberately silent placeholder bed is a
+  real use, and join.py's `--on-silent` takes the same default and -50 dBFS peak threshold) but
+  names it under `silent` and in a note; `--on-silent fail` makes it one more `problems` entry in
+  the 2.2.4 refusal. Peak rather than mean: a sparse effects track with a quiet mean is not
+  silent. Tests: `test_audio_silent_beds_warn_by_default_and_fail_on_request`,
+  `test_audio_duck_under_a_silent_voice_is_reported`.
+- **Non-finite numbers are strings, not `-Infinity`.** `print_json` maps -inf/inf to `"-inf"` /
+  `"inf"` and NaN to `null` and serialises with `allow_nan=False`: a JSON-valid document beats a
+  numeric type for a value that has no JSON number, and `"-inf"` is what `loudness.py` already
+  reported. A silent export's note says the audio is silent; loudness.py cannot fix that, so it
+  is neither recommended nor run by `--normalize`. Test:
+  `test_audio_every_tool_json_on_silent_input_parses_strictly`.
+- **`check.py --content` is opt-in, and its thresholds are loose.** The black / frozen /
+  silence rows cost a full decode of the file (one pass, blackdetect + freezedetect +
+  silencedetect), where the default rows cost an ffprobe and one audio pass; and a black
+  intro, a held title card or a silent B-roll montage are real edits, so they would be noise on
+  every delivery. Thresholds: `black` WARN above 10% of the duration, FAIL at >= 95% (all
+  black, allowing blackdetect's last-frame shortfall); `frozen` WARN when the longest frozen
+  span exceeds max(3 s, 30% of the duration) -- a 3 s title hold is normal, a stuck third of a
+  short is not -- FAIL at >= 95% (the whole video frozen); `silence` WARN above 50% below
+  -50 dB, FAIL at >= 95%. Only FAIL means "almost certainly a broken render". The default row
+  set is byte-identical without the flag. Tests: `test_check_content_rows`,
+  `test_check_default_rows_unchanged_without_content`.
+- **`check.py`'s `audio` row flags a silent track even without `--content`: FAIL under a loudness target, WARN with none (a muted screen recording is legitimate).** A present
+  stream at or below -50 dBFS peak (2.2.6's threshold) is the empty-TTS / muted-export case
+  that "present" used to pass; it costs nothing when the loudness pass ran (its true peak is
+  read) and one volumedetect pass when loudness is skipped. Test:
+  `test_check_audio_row_fails_on_silent_track`.
+
+## 2.3.0 — short, repeated and silent inputs
+
+- **A short or repeated join input warns; it never refuses.** A clip under 2 frames (audio-only:
+  0.05 s) is almost always a failed earlier step, but a repeated clip (an intro used twice, a
+  loop) is a real edit, and the frame count cannot tell a deliberate one-frame flash from a bug.
+  Both are named under `short_segments` / `duplicates` and in notes; `verified` and the ffmpeg
+  command are unchanged. Test: `test_join_warns_on_short_segments_and_duplicates`.
+- **A silent waveform input warns by default, like audio.py.** `waveform.py --on-silent`
+  takes audio.py's default (`warn`) and -50 dBFS peak threshold; `verified` stays about the
+  render (size, rate, duration) so the top-level and `audiogram.verified` never disagree, and
+  `silent` is the key a caller reads. `--dry-run` measures nothing and says `null`. Test:
+  `test_waveform_silent_input_warns_or_fails`.
+- **"Found no speech" is not "no engine".** An engine that ran and returned no cue is refused
+  as `kind: input`, `reason: "no_speech"`, naming the engine and the caller's input rather than
+  the engine's deleted temporary SRT. Tests: `AsrNoSpeechTests`.

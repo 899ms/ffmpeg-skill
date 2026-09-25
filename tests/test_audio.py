@@ -6,6 +6,7 @@
 """
 import json
 import shlex
+import subprocess
 import sys
 import unittest
 
@@ -546,6 +547,40 @@ class AudiogramTests(MediaFixtures):
         self.assertFalse(doc["verified"])
         self.assertFalse(doc["audiogram"]["verified"])
 
+    def test_waveform_silent_input_warns_or_fails(self):
+        """A silent input renders a flat line that used to be reported as verified. The real run
+        measures the input's peak (same -50 dBFS --silence-threshold and --on-silent warn|fail as
+        audio.py): warn (default) renders it with `silent: true` and a note, fail refuses as kind
+        input before ffmpeg runs; --dry-run measures nothing (`silent: null`)."""
+        src = OUT / "wave_silent.wav"
+        sh("ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", "anullsrc=d=1", "-t", "1", src)
+        doc = json.loads(script("waveform.py", src, "--width", "128", "--height", "128", "--json",
+                                "-o", OUT / "wave_silent.mp4").stdout)
+        self.assertIs(doc["silent"], True)
+        self.assertTrue(any("silent" in n for n in doc["notes"]))
+        proc = script("waveform.py", src, "--on-silent", "fail", "--width", "128", "--height", "128", "--json",
+                      "-o", OUT / "wave_silent_fail.mp4", expect_fail=True)
+        doc = json.loads(proc.stdout)
+        self.assertEqual((doc["error"]["kind"], doc["commands"]), ("input", []))
+        self.assertIn("silent", doc["error"]["message"])
+        self.assertFalse((OUT / "wave_silent_fail.mp4").exists())
+        doc = json.loads(script("waveform.py", src, "--dry-run", "--json", "-o", OUT / "wave_silent_dry.mp4").stdout)
+        self.assertIsNone(doc["silent"])
+        doc = json.loads(script("waveform.py", self.mic, "--width", "128", "--height", "128", "--json",
+                                "-o", OUT / "wave_loud.mp4").stdout)
+        self.assertIs(doc["silent"], False)
+
+    def test_audiogram_refuses_a_zero_by_zero_image(self):
+        """A truncated PNG that ffprobe reports as 0x0 is an input refusal naming the image."""
+        full = self._plate(64, 64)
+        trunc = OUT / "ag_trunc.png"
+        trunc.write_bytes(full.read_bytes()[:30])
+        proc = script("waveform.py", self.mic, "--image", trunc, "-o", OUT / "ag_trunc.mp4",
+                      "--json", expect_fail=True)
+        doc = json.loads(proc.stdout)
+        self.assertEqual(doc["error"]["kind"], "input")
+        self.assertIn(str(trunc), doc["error"]["message"])
+
     def test_audiogram_refuses_an_image_ffmpeg_cannot_decode(self):
         """Spec 2.6: a file that is not a decodable image is an input refusal naming it, before
         ffmpeg is ever started -- not a raw ffmpeg failure."""
@@ -628,6 +663,18 @@ class AudiogramTests(MediaFixtures):
         self.assertEqual(doc["commands"], [], "nothing was encoded")
         self.assertFalse((OUT / "wf_nosrt_vis.mp4").exists())
 
+    def test_waveform_srt_outside_the_render_is_refused_as_input(self):
+        """2.2.6: caption.py refuses a cue file none of whose cues falls inside the video; the
+        audiogram's caption stage passes that refusal on as kind input."""
+        srt = OUT / "wf_late.srt"
+        srt.write_text("1\n00:10:00,000 --> 00:10:02,000\nLate\n", encoding="utf-8")
+        out = OUT / "wf_late.mp4"
+        proc = script("waveform.py", self.mic, "--width", "320", "--height", "180", "--srt", srt,
+                      "--json", "-o", out, expect_fail=True)
+        doc = json.loads(proc.stdout)
+        self.assertEqual(doc["error"]["kind"], "input")
+        self.assertIn("no cue falls inside the video", doc["error"]["message"])
+
     def test_waveform_failed_caption_stage_keeps_child_kind_and_cleans_up(self):
         """A caption stage that fails re-raises caption.py's own kind (here: an existing output
         without --overwrite is an input refusal), and the _vis intermediate is removed."""
@@ -667,6 +714,88 @@ class AudiogramTests(MediaFixtures):
             self.assertIn(str(pics[0]), doc["error"]["message"])
             self.assertIn(str(pics[1]), doc["error"]["message"])
             self.assertEqual(doc["commands"], [])
+
+    # ------------------------------------------------------------ silent tracks (2.2.6)
+    def _silent_files(self):
+        wav = OUT / "silent_bed.wav"
+        if not wav.exists():
+            sh("ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-f", "lavfi",
+               "-i", "anullsrc=r=48000:cl=stereo", "-t", "3", wav)
+        clip = OUT / "silent_voice_clip.mp4"
+        if not clip.exists():
+            sh("ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", "testsrc=d=3:s=160x120",
+               "-f", "lavfi", "-i", "anullsrc=r=48000:cl=stereo", "-t", "3", "-c:v", "libx264", "-c:a", "aac", clip)
+        return wav, clip
+
+    def test_audio_silent_beds_warn_by_default_and_fail_on_request(self):
+        """A silent --music / --effects / --replace file used to be mixed and reported as verified.
+        Default warn: mixed, named under `silent` and in a note. --on-silent fail: named in the
+        single input refusal, before ffmpeg runs. A dry run measures nothing (a writing tool's dry
+        run runs no ffmpeg), so it completes and the real run is the one that refuses."""
+        wav, _ = self._silent_files()
+        for flag in ("--music", "--effects", "--replace"):
+            doc = json.loads(script("audio.py", self.src, flag, wav, "--json",
+                                    "-o", OUT / "silent_bed_out.mp4").stdout)
+            self.assertEqual(doc["status"], "completed")
+            self.assertEqual([(t["flag"], t["path"]) for t in doc["silent"]], [(flag, str(wav))])
+            self.assertLessEqual(doc["silent"][0]["peak_db"], -50)
+            self.assertTrue(any("silent" in n for n in doc["notes"]))
+            proc = script("audio.py", self.src, flag, wav, "--on-silent", "fail", "--json",
+                          "-o", OUT / "silent_bed_out.mp4", expect_fail=True)
+            err = json.loads(proc.stdout)
+            self.assertEqual(err["error"]["kind"], "input")
+            self.assertEqual(len(err["problems"]), 1)
+            self.assertEqual(err["problems"][0]["flag"], flag)
+            self.assertRegex(err["problems"][0]["reason"], r"^silent \(peak -?[0-9.]+ dBFS\)$")
+            self.assertEqual(err["commands"], [])
+            doc = json.loads(script("audio.py", self.src, flag, wav, "--on-silent", "fail", "--json", "--dry-run",
+                                    "-o", OUT / "silent_bed_out.mp4").stdout)
+            self.assertEqual(doc["status"], "completed")
+        # a real bed is never reported, and a lower threshold lets the silent one through
+        doc = json.loads(script("audio.py", self.src, "--music", self.mic, "--json", "--dry-run",
+                                "-o", OUT / "silent_bed_out.mp4").stdout)
+        self.assertNotIn("silent", doc)
+        doc = json.loads(script("audio.py", self.src, "--music", wav, "--silence-threshold", "-120",
+                                "--on-silent", "fail", "--json", "-o", OUT / "silent_bed_out.mp4").stdout)
+        self.assertEqual(doc["status"], "completed")
+
+    def test_audio_duck_under_a_silent_voice_is_reported(self):
+        _, clip = self._silent_files()
+        doc = json.loads(script("audio.py", clip, "--music", self.mic, "--duck", "--json",
+                                "-o", OUT / "silent_duck_out.mp4").stdout)
+        self.assertEqual([t["flag"] for t in doc["silent"]], ["input"])
+        proc = script("audio.py", clip, "--music", self.mic, "--duck", "--on-silent", "fail", "--json",
+                      "-o", OUT / "silent_duck_out.mp4", expect_fail=True)
+        self.assertEqual([p["flag"] for p in json.loads(proc.stdout)["problems"]], ["input"])
+
+    def test_audio_every_tool_json_on_silent_input_parses_strictly(self):
+        """A silent file measures -inf LUFS; json.dumps wrote it as -Infinity (export.py's
+        `loudness.lufs`), which no strict JSON parser reads. Every --json document must parse
+        with NaN/Infinity refused, and export's note must say the audio is silent."""
+        _, clip = self._silent_files()
+
+        def strict(text):
+            def refuse(c):
+                raise ValueError(f"non-standard JSON constant {c}")
+            return json.loads(text, parse_constant=refuse)
+
+        runs = [("probe.py", clip), ("check.py", clip, "--platform", "youtube"),
+                ("loudness.py", clip, "--measure-only"), ("loudness.py", clip, "-o", OUT / "silent_ln.mp4"),
+                ("export.py", clip, "--preset", "youtube", "-o", OUT / "silent_export.mp4"),
+                ("audio.py", clip, "--fade-in", "0.5", "-o", OUT / "silent_audio.mp4"),
+                ("silence.py", clip, "-o", OUT / "silent_cut.mp4")]
+        for name, *args in runs:
+            extra = ["--overwrite"] if "-o" in args else []
+            proc = subprocess.run([sys.executable, str(SCRIPTS / name), *map(str, args), "--json", *extra],
+                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            doc = strict(proc.stdout)  # success or refusal, either document must be strict JSON
+            self.assertIsInstance(doc, dict, name)
+            if name == "export.py":
+                self.assertEqual(doc["loudness"]["lufs"], "-inf")
+                self.assertTrue(doc["loudness"]["silent"])
+                self.assertFalse(doc["loudness"]["ok"])
+                self.assertTrue(any(n.startswith("output audio is silent") for n in doc["notes"]))
+                self.assertFalse(any("run loudness.py" in n for n in doc["notes"]))
 
 
 if __name__ == "__main__":

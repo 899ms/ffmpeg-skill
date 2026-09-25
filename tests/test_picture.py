@@ -270,6 +270,67 @@ class PictureTests(MediaFixtures):
         self.assertClose(m["duration"], 12.0, 0.15)
         self.assertEqual(m["video"]["width"], 1280)
 
+    def test_caption_refuses_cues_that_are_never_visible(self):
+        """2.2.6: a burn that draws nothing is a refusal, not a verified output -- every cue after
+        the end of the video, every cue blank, or an ASS with no Dialogue lines."""
+        late = OUT / "cap_late.srt"
+        late.write_text("1\n00:00:20,000 --> 00:00:22,000\nToo late\n", encoding="utf-8")
+        blank = OUT / "cap_blank.srt"
+        blank.write_text("1\n00:00:01,000 --> 00:00:02,000\n   \n\n2\n00:00:03,000 --> 00:00:04,000\n \n",
+                         encoding="utf-8")
+        empty_ass = OUT / "cap_empty.ass"
+        empty_ass.write_text("[Script Info]\nScriptType: v4.00+\n\n[Events]\nFormat: Layer, Start, End, "
+                             "Style, Name, MarginL, MarginR, MarginV, Effect, Text\n", encoding="utf-8")
+        late_ass = OUT / "cap_late.ass"
+        late_ass.write_text(empty_ass.read_text(encoding="utf-8")
+                            + "Dialogue: 0,0:00:30.00,0:00:31.00,Default,,0,0,0,,Late\n", encoding="utf-8")
+        for flag, path, needle in (("--srt", late, "no cue falls inside the video"),
+                                   ("--srt", blank, "every cue is blank"),
+                                   ("--ass", empty_ass, "no Dialogue lines"),
+                                   ("--ass", late_ass, "no cue falls inside the video")):
+            for dry in ((), ("--dry-run",)):
+                out = OUT / "cap_invisible.mp4"
+                proc = script("caption.py", self.src, flag, path, *dry, "--json", "-o", out, expect_fail=True)
+                doc = json.loads(proc.stdout)
+                self.assertEqual(doc["error"]["kind"], "input", (path, dry))
+                self.assertIn(needle, doc["error"]["message"], (path, dry))
+        self.assertIn("first cue starts at 20.0 s", json.loads(script(
+            "caption.py", self.src, "--srt", late, "--json", "-o", OUT / "cap_invisible.mp4",
+            expect_fail=True).stdout)["error"]["message"])
+
+    def test_caption_reports_cues_burned_and_outside(self):
+        srt = OUT / "cap_partly.srt"
+        srt.write_text("1\n00:00:01,000 --> 00:00:03,000\nSeen\n\n2\n00:00:30,000 --> 00:00:32,000\nUnseen\n",
+                       encoding="utf-8")
+        out = OUT / "cap_partly.mp4"
+        doc = json.loads(script("caption.py", self.src, "--srt", srt, "--preset", "ultrafast",
+                                "--json", "-o", out).stdout)
+        self.assertEqual(doc["caption"]["cues_burned"], 1)
+        self.assertEqual(doc["caption"]["cues_outside"], 1)
+        self.assertTrue(any("outside the video" in n for n in doc.get("notes", [])))
+
+    def test_caption_real_run_does_not_say_rerun_without_dry_run(self):
+        srt = OUT / "cap_adj.srt"
+        srt.write_text("1\n00:00:01,000 --> 00:00:03,000\nHello\n", encoding="utf-8")
+        out = OUT / "cap_adj.mp4"
+        doc = json.loads(script("caption.py", self.src, "--srt", srt, "--offset", "0.5", "--preset",
+                                "ultrafast", "--json", "-o", out).stdout)
+        notes = " ".join(doc.get("notes", []))
+        self.assertIn("_adjusted.srt", notes)
+        self.assertNotIn("without --dry-run", notes)
+        dry = json.loads(script("caption.py", self.src, "--srt", srt, "--offset", "0.5", "--dry-run",
+                                "--json", "-o", out).stdout)
+        self.assertIn("without --dry-run", " ".join(dry.get("notes", [])))
+
+    def test_graphics_and_overlay_refuse_blank_text(self):
+        out = OUT / "blank_text.mp4"
+        for tool, args in (("graphics.py", ("--template", "title", "--title", "  ")),
+                           ("graphics.py", ("--template", "lower-third", "--name", " ", "--title", "x")),
+                           ("graphics.py", ("--template", "sticker", "--text", "\t")),
+                           ("overlay.py", ("--text", "  "))):
+            proc = script(tool, self.src, *args, "--json", "-o", out, expect_fail=True)
+            self.assertEqual(json.loads(proc.stdout)["error"]["kind"], "input", (tool, args))
+
     def test_caption_wraps_a_long_latin_cue_to_the_safe_area(self):
         """A 60-character cue at size 48 on a 640-wide frame does not fit one line; it is wrapped
         to the safe area and, past --max-lines, split into consecutive cues rather than running
@@ -3378,6 +3439,90 @@ class FitSizeTests(unittest.TestCase):
              unittest.mock.patch.object(subprocess, "run", boom), \
              unittest.mock.patch.object(subprocess, "Popen", boom):
             self.assertEqual(self._fit([self.CW1])["size"], 16)
+
+
+class AsrNoSpeechTests(unittest.TestCase):
+    """An engine that ran and heard nothing is `<engine> found no speech in <input>` (kind input,
+    reason no_speech). Before 2.3.0 faster-whisper fell through to "no local speech-to-text engine
+    found" and whisper.cpp / openai-whisper said "no cues found in /tmp/ffskill_asr_*/audio.srt".
+    The engines are stubbed: none is installed where this suite runs."""
+
+    def _run(self, which, write_srt=None, faster=None):
+        import tempfile
+        import types
+        import _common
+        from _common import asr
+
+        class FakeShutil:
+            @staticmethod
+            def which(name):
+                return which.get(name)
+
+        class FakeSubprocess:
+            PIPE = subprocess.PIPE
+            TimeoutExpired = subprocess.TimeoutExpired
+
+            @staticmethod
+            def run(cmd, **kw):
+                write_srt(cmd)
+                return subprocess.CompletedProcess(cmd, 0, "", "")
+
+        calls = []
+
+        def fake_die(msg, code=1, kind="input", **extra):
+            calls.append((msg, kind, extra))
+            raise SystemExit(code)
+
+        mods = dict(sys.modules)
+        if faster is not None:
+            mods["faster_whisper"] = faster
+        else:
+            mods["faster_whisper"] = None  # ImportError on import
+        tmp = tempfile.mkdtemp(prefix="asr_test_")
+        try:
+            with unittest.mock.patch.object(_common, "run_analysis", lambda *a, **k: None), \
+                 unittest.mock.patch.object(asr, "die", fake_die), \
+                 unittest.mock.patch.dict(sys.modules, mods), \
+                 self.assertRaises(SystemExit):
+                asr._transcribe_in(tmp, "talk.wav", os.path.join(tmp, "out.srt"), None, "base", 0,
+                                   "ffmpeg", FakeShutil, FakeSubprocess)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+        self.assertEqual(len(calls), 1, calls)
+        return calls[0]
+
+    def _assert_no_speech(self, call, engine):
+        msg, kind, extra = call
+        self.assertEqual(msg, f"{engine} found no speech in talk.wav")
+        self.assertEqual(kind, "input")
+        self.assertEqual(extra.get("reason"), "no_speech")
+        self.assertEqual(extra.get("engine"), engine)
+        self.assertNotIn("/tmp", msg)
+
+    def test_whisper_cpp_empty_srt_is_no_speech(self):
+        def write(cmd):
+            Path(cmd[cmd.index("-of") + 1] + ".srt").write_text("", encoding="utf-8")
+        self._assert_no_speech(self._run({"whisper-cli": "/opt/whisper/whisper-cli"}, write), "whisper.cpp")
+
+    def test_openai_whisper_empty_srt_is_no_speech(self):
+        def write(cmd):
+            Path(cmd[cmd.index("--output_dir") + 1], "audio.srt").write_text("\n", encoding="utf-8")
+        self._assert_no_speech(self._run({"whisper": "/usr/bin/whisper"}, write), "openai-whisper")
+
+    def test_faster_whisper_no_segments_is_no_speech_not_no_engine(self):
+        import types
+        mod = types.ModuleType("faster_whisper")
+
+        class WhisperModel:
+            def __init__(self, *a, **k):
+                pass
+
+            def transcribe(self, *a, **k):
+                return iter([]), None
+        mod.WhisperModel = WhisperModel
+        call = self._run({}, faster=mod)
+        self._assert_no_speech(call, "faster-whisper")
+        self.assertNotIn("no local speech-to-text engine", call[0])
 
 
 if __name__ == "__main__":

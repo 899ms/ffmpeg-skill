@@ -186,6 +186,11 @@ The workflow in `SKILL.md` is "probe first, verify last". The contract states it
 (fit, caption, overlay, graphics, color, join, multicam, render). Audio-only tools and
 audio-only inputs never need `look`; the report line is `Look: not needed`. `check`
 rows carry `kind: format` (fix it) or `kind: judgement` (decide with the user).
+The `audio` row FAILs (WARN when no loudness target applies) when the track is present but silent (peak at or below -50 dBFS, from
+the loudness pass or, when loudness is skipped, one volumedetect pass). `check --content`
+(opt-in; render.py `"check": {"content": true}`) adds `black`, `frozen` and `silence` rows
+from one decode pass; without it the row set is unchanged. Thresholds:
+`docs/design-decisions.md` ("check.py --content").
 
 ### Dry run
 
@@ -441,6 +446,20 @@ runs a shell, evaluates strings, or executes anything other than the named scrip
 
 ## JSON output
 
+Non-finite numbers never reach a `--json` document (2.2.6): every tool prints through one
+writer that turns `-inf` / `inf` into the strings `"-inf"` / `"inf"` (the spelling
+`loudness.py` already used for a silent input) and NaN into `null`, then serialises with
+`allow_nan=False`, so a strict JSON parser reads every document. A silent file's loudness is
+therefore `"lufs": "-inf"`, never `-Infinity`.
+
+`audio.py` (2.2.6) measures the whole-file peak of every `--music` / `--replace` / `--effects`
+file and, under `--duck`, of the voice: at or below `--silence-threshold` (default -50 dBFS)
+the track is silent. `--on-silent warn` (default) mixes it and adds `silent: [{flag, path,
+peak_db}]` plus a `notes` line; `--on-silent fail` names it in the single `kind: input`
+refusal's `problems` with reason `"silent (peak X dBFS)"`. A real run measures every file
+that exists. `export.py`'s `loudness` gains `silent: true` for a silent output, whose note
+says "output audio is silent" instead of recommending `loudness.py`.
+
 Per-tool keys added in 1.13: `audio` (`audio.py`) reports the mix it built — the
 `--voice` level, `stereo_widen`, whether an `--effects` bed was mixed, and with
 `--music` the `music_volume` plus a `duck` object naming the threshold (dB and
@@ -477,6 +496,7 @@ Per-tool keys added in 1.17.1, all additive:
 | key | tool | what it holds |
 |---|---|---|
 | `caption` | `render.py` | the caption stage's own block, forwarded verbatim from `caption.py` (the cue-layout counts plus the fit-size keys above), so a template run can be read for `split` and `size_used` without re-running the stage. `null` when the project has no captions stage — and also when the captions stage came from the `--cache` (a cache hit carries no stage document, so a second `render.py … --cache DIR` run reports `caption: null` while `stages_done` still lists `captions`). `caption.py --mode mux` writes no `caption` block at all |
+| `cues_burned`, `cues_outside` | `caption.py` | siblings inside the `caption` block, **burn mode only** (2.2.6): `cues_burned` counts the non-blank cues that overlap `[0, duration]` of the video and are drawn, `cues_outside` the non-blank cues wholly outside it (each also named in `notes`). A burn where none is visible — every cue after the end, every cue blank, an `--ass` with no `Dialogue` lines — is refused with `kind: input` instead of reporting `verified: true`; `waveform.py --srt` passes that refusal on with the same kind |
 | `text_unchanged` | `caption.py` | a sibling inside the `caption` block, **burn mode only** (`--mode mux` never touches the text and omits the key): `true` when the drawn text equals the cues that were handed in — nothing transcribed, no cue dropped, no cue **split** across two consecutive cues and no glyph stripped (`--emoji none`). Wrapping, line breaks and timing do not count: the words are the same. This tool never rewrites, shortens or translates a cue, so the key is a statement of what happened, not a judgement of the text |
 
 
@@ -497,6 +517,14 @@ Per-tool keys added after 2.2.2, all additive:
 | key | tool | what it holds |
 |---|---|---|
 | `sdr_path`, `notes` | `color.py --to-sdr` | `sdr_path` is `"tonemap"` for PQ / HLG / Dolby Vision input (and `--force` on an untagged file) or `"gamut"` for BT.2020 primaries on an SDR transfer, which is converted to BT.709 without a tone map (`--tonemap`/`--peak`/`--desat` do not apply); `notes` says which path was taken and why |
+| `silent` | `join.py` (every run) | `[{index, path, peak_db}]`: inputs whose whole-file audio peak (volumedetect) is at or below `--silence-threshold` (default -50 dBFS) and that `--on-silent warn` (default) joined anyway, with a `notes` line; `[]` otherwise. `--on-silent fail` names them in the `kind: input` refusal's `problems` (reason `silent (peak -91.0 dBFS)`), `skip` lists them under `skipped`. An input with no audio stream is never silent; `verified` is unaffected |
+| `short_segments`, `duplicates` | `join.py` (every run) | warnings, never refusals, and the join command is unchanged: `short_segments: [{index, path, duration}]` names each measured input shorter than 2 frames at the join's fps (an audio-only join: shorter than 0.05 s); `duplicates: [{path, indices}]` names a path (compared resolved) listed more than once — repeating a clip can be intended. `[]` when none; each non-empty one adds a `notes` line |
+| `silent` | `waveform.py` (every run) | `true` when the input audio's whole-file peak is at or below `--silence-threshold` (default -50 dBFS), which draws a flat line; `--on-silent warn` (default) renders it anyway with a `notes` line, `fail` refuses (`kind: input`) before ffmpeg runs. `false` when audible, `null` under `--dry-run` (nothing measured). `verified` is unaffected |
+
+`caption.py --transcribe` and `silence.py --filler --transcribe`: when a local speech engine ran
+and produced no cue, the refusal is `"<engine> found no speech in <input>"` with `kind: input`,
+`reason: "no_speech"` and `engine` in the failure document — distinct from the "no local
+speech-to-text engine found" refusal, which now only means no engine was found.
 
 `check.py` also gains an informational `subtitles` row on **every** platform:
 `PASS` when every soft subtitle stream carries a language tag, `WARN` when one

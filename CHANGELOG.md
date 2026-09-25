@@ -4,7 +4,23 @@
 
 ## Unreleased
 
-(nothing yet)
+- feat(join): `--on-silent warn|fail|skip` (default `warn`) and `--silence-threshold DB` (default -50 dBFS). The preflight measures every input with audio (one volumedetect pass on a real run; `--dry-run` measures nothing and says so) and treats a peak at or below the threshold as silent -- the trace of a TTS step that wrote a valid but empty wav, which the 2.2.0 missing/empty/unreadable checks let through. `warn` joins it and names it under the new `silent: [{index, path, peak_db}]` key and in `notes`; `fail` refuses it in the same `kind: input` document as the other problems (`silent (peak -91.0 dBFS)`); `skip` drops it into `skipped`. Inputs without an audio stream are never silent. The join's own ffmpeg command is unchanged, and render.py forwards nothing new.
+- fix: `audio.py` no longer passes a silent `--music` / `--replace` / `--effects` file, or a silent
+  voice under `--duck`, as verified. Each is peak-measured in the 2.2.4 preflight (real runs; a dry run measures nothing);
+  new `--on-silent warn|fail` (default warn: `silent: [{flag, path, peak_db}]` + note; fail:
+  reason `silent (peak X dBFS)` in the one refusal) and `--silence-threshold` (default -50 dBFS).
+- fix: no `--json` document contains `-Infinity` / `NaN` any more. `print_json` writes
+  non-finite floats as `"-inf"` / `"inf"` / `null` (as `loudness.py` already did) with
+  `allow_nan=False`; `export.py` on silent audio reports `loudness.lufs: "-inf"`,
+  `silent: true`, and a note saying "output audio is silent" instead of recommending loudness.py.
+- fix(caption): a burn whose cues are never visible is refused with `kind: input` instead of reporting `verified: true` -- every cue outside `[0, duration]`, every cue blank, or `--ass` with no `Dialogue` lines; applies to `waveform.py --srt` too. The `caption` block reports `cues_burned` and `cues_outside`, and cues partly outside get a warning note
+- fix(graphics, overlay): whitespace-only `--title`, `--name`, `--text` (and the other text flags) count as missing and are refused instead of burning an empty graphic
+- feat(check): `--content` (opt-in) adds `black` (blackdetect share: WARN > 10%, FAIL >= 95%), `frozen` (freezedetect longest span: WARN > max(3 s, 30%), FAIL when the whole video is frozen) and `silence` (silencedetect share at -50 dB: WARN > 50%, FAIL >= 95%) rows from one decode pass. Without it the row set is unchanged. render.py's `check` section takes `"content": true` to forward it.
+- fix(check): the `audio` row no longer PASSes "present" for a silent track: FAIL under a platform/`--lufs` loudness target, WARN with none (a muted screen recording is legitimate), when the track is silent (peak <= -50 dBFS) -- read off the loudness pass, or from one volumedetect pass when `--no-loudness` or a spec without a loudness target skips it.
+- fix(caption): the "re-run without --dry-run to produce X_adjusted.srt" note appears only on dry runs
+- fix(join): a segment shorter than 2 frames (audio-only: 0.05 s) and a path listed twice no longer join unremarked: new `short_segments: [{index, path, duration}]` and `duplicates: [{path, indices}]` keys (always present, `[]` when none) plus notes. Warnings only; the join command is unchanged.
+- fix(waveform): silent input audio no longer renders a flat-line audiogram without a word. A real run peak-measures the input; `--on-silent warn|fail` (default warn) and `--silence-threshold` (default -50 dBFS) as in `audio.py`; new `silent` key (`null` under `--dry-run`) and a note.
+- fix(asr): a speech engine that ran and found no speech says `<engine> found no speech in <input>` (`kind: input`, `reason: "no_speech"`, `engine`) instead of faster-whisper's "no local speech-to-text engine found" or whisper.cpp / openai-whisper's "no cues found in /tmp/ffskill_asr_*/audio.srt".
 
 ## 2.2.5
 

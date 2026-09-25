@@ -1,6 +1,6 @@
 # Script reference
 
-Every script prints the same information with `--help`; this file exists so the agent can read several at once. All scripts accept `--dry-run`, `--json`, `--json-brief` (since 1.11.0: the same JSON result trimmed to `status`, `output`, `dry_run`, `verified`, a compact `summary` of the output probe -- duration_s, width, height, fps, vcodec, acodec, channels, and lufs when measured -- the tool's own keys, and the count of commands instead of the command lines; it implies `--json`, leaves `--json`'s own output untouched, and failures print the usual full failure document), `--fast`, `--progress`, `--timeout SECONDS`, `--overwrite`, `--plan FILE` (the dry run written as a plan document that `render.py FILE` executes later; see render.py), `-o OUT`; every editing tool that re-encodes (not `export.py`, whose preset decides the codec) also takes `--codec h264|hevc|av1|prores` (the encoder for the re-encode; default x264 for SDR, x265 Main10 for HDR, unchanged) and `--quality N` (CRF scale, default 18 -- 30 for `proxy.py`; up to 63 for av1; ignored by prores). 2.0 removed `--crf` from these tools (it was `--quality`'s alias); `export.py` keeps its own `--crf`, which is not an alias. Every tool refuses (`kind: input`, before anything runs) to replace an existing output unless `--overwrite` is given. `--codec hevc` on SDR writes 8-bit BT.709 HEVC (`hvc1`), `av1` uses SVT-AV1 (libaom fallback), `prores` is 422 HQ and needs an explicit `-o NAME.mov` (or `.mkv`), `h264` refuses an HDR source (`kind: input`, run `color.py --to-sdr` first). `export.py` keeps choosing the codec from its preset and has neither flag; a `render.py` project cannot choose a codec either -- but `--dry-run` only guarantees nothing is written for writing tools: `probe` (read-only, `--dry-run` changes nothing) still runs ffprobe, `check`/`sync`/`multicam`/`scenes`/`cropdetect`/`report`/`silence`/`loudness`/`stabilize` still run their ffmpeg/ffprobe measurements (a dry-run plan rests on real numbers; they just don't write the final artifact), and `verify` accepts the flag but ignores it entirely. Exact per-tool semantics: `contract --json`'s `dry_run` field (or `docs/contract.md`).
+Every script prints the same information with `--help`; this file exists so the agent can read several at once. All scripts accept `--dry-run`, `--json`, `--json-brief` (since 1.11.0: the same JSON result trimmed to `status`, `output`, `dry_run`, `verified`, a compact `summary` of the output probe -- duration_s, width, height, fps, vcodec, acodec, channels, and lufs when measured -- the tool's own keys, and the count of commands instead of the command lines; it implies `--json`, leaves `--json`'s own output untouched, and failures print the usual full failure document), `--fast`, `--progress`, `--timeout SECONDS`, `--overwrite`, `--plan FILE` (the dry run written as a plan document that `render.py FILE` executes later; see render.py), `-o OUT`; every editing tool that re-encodes (not `export.py`, whose preset decides the codec) also takes `--codec h264|hevc|av1|prores` (the encoder for the re-encode; default x264 for SDR, x265 Main10 for HDR, unchanged) and `--quality N` (CRF scale, default 18 -- 30 for `proxy.py`; up to 63 for av1; ignored by prores). 2.0 removed `--crf` from these tools (it was `--quality`'s alias); `export.py` keeps its own `--crf`, which is not an alias. Every tool refuses (`kind: input`, before anything runs) to replace an existing output unless `--overwrite` is given. `--codec hevc` on SDR writes 8-bit BT.709 HEVC (`hvc1`), `av1` uses SVT-AV1 (libaom fallback), `prores` is 422 HQ and needs an explicit `-o NAME.mov` (or `.mkv`), `h264` refuses an HDR source (`kind: input`, run `color.py --to-sdr` first). `export.py` keeps choosing the codec from its preset and has neither flag; a `render.py` project cannot choose a codec either -- but `--dry-run` only guarantees nothing is written for writing tools: `probe` (read-only, `--dry-run` changes nothing) still runs ffprobe, `check`/`sync`/`multicam`/`scenes`/`cropdetect`/`report`/`silence`/`loudness`/`stabilize`/`join` still run their ffmpeg/ffprobe measurements (a dry-run plan rests on real numbers; they just don't write the final artifact), and `verify` accepts the flag but ignores it entirely. Exact per-tool semantics: `contract --json`'s `dry_run` field (or `docs/contract.md`).
 
 ## Time grammar (every time-taking flag, 1.9)
 
@@ -312,7 +312,7 @@ waveform.py INPUT [--style waveform|spectrum] [--width W] [--height H] [--fps N]
                    [--image PATH] [--image-fit cover|contain|blur]
                    [--position bottom|centre|top|strip] [--vis-height FRAC] [--opacity 0..1]
                    [--platform NAME] [--srt FILE | --text FILE] [--title TEXT] [--brand brand.json]
-                   [-o OUT]
+                   [--on-silent warn|fail] [--silence-threshold -50] [-o OUT]
 ```
 Renders the input's audio as a video: `--style waveform` (default, FFmpeg's
 `showwaves`) draws amplitude over time; `--style spectrum` (`showspectrum`)
@@ -343,7 +343,11 @@ give an image or a colour. The title and caption stages receive `--overwrite`, `
 `--srt`/`--text` file is refused (`kind: input`) before anything is encoded. Without any of
 these flags the command line is byte-identical to 1.15's. Every run's result carries an `audiogram` object (style,
 background, image, position, vis_height, platform, captions, title, stages,
-verified). `render.py --template audiogram` is the one-call form; it is
+verified). A real run peak-measures the input audio: at or below `--silence-threshold`
+(default -50 dBFS) the render is a flat line, so `--on-silent warn` (default) renders it with
+`silent: true` and a note and `fail` refuses (`kind: input`) before encoding; `silent` is
+`null` under `--dry-run`. An `--image` ffprobe reports as 0x0 is refused as undecodable.
+`render.py --template audiogram` is the one-call form; it is
 deliberately not part of `--template all`.
 
 ### freeze.py — hold a frame for N seconds
@@ -556,7 +560,7 @@ writes the resulting cut list exactly as it does today.
 ```
 join.py CLIP1 CLIP2 [...] [--transition fade|dissolve|wipeleft|slideleft|fadeblack|fadewhite|circleopen|none]
         [--duration 0.5] [--width W --height H] [--fps N] [--fit pad|crop] [-o OUT]
-join.py --list parts.txt [--on-missing fail|skip] [...]
+join.py --list parts.txt [--on-missing fail|skip] [--on-silent warn|fail|skip] [--silence-threshold -50] [...]
 ```
 `--list FILE` (2.2) reads the clips from a file, one per line in order, paths relative to the
 file (blank lines and `#` comments ignored; ffmpeg's `file 'x.wav'` lines accepted), for the
@@ -572,6 +576,16 @@ in for its streams (any audio extension the skill reads, `.aiff` and `.caf` incl
 picture), so a pending `.mp4` next to measured audio is refused as the mix a real run would
 refuse; `expected_duration` is null while any input is pending, and `notes` names the planned
 frame, rate or xfade offsets that rest on a pending input's unmeasured placeholder.
+Every existing input with an audio stream is also measured (one volumedetect pass; not under `--dry-run`
+too): a peak at or below `--silence-threshold` (default -50 dBFS) is silent, the trace of a TTS
+call that wrote a valid but empty file. `--on-silent warn` (default) joins it and names it under
+`silent: [{index, path, peak_db}]` and in `notes`; `fail` refuses it in the same `kind: input`
+document (`silent (peak -91.0 dBFS)`); `skip` leaves it out under `skipped`. A clip without an
+audio stream is never silent.
+Two warnings never refuse or change the command: `short_segments: [{index, path, duration}]`
+names a clip shorter than 2 frames at the join's fps (audio-only: 0.05 s), and
+`duplicates: [{path, indices}]` a path listed more than once (a repeat can be intended); both
+are always present (`[]` when none) and noted.
 Normalises every clip to one frame size, fps, `yuv420p`, 48 kHz and one
 channel layout (the widest clip's -- a 5.1 clip keeps 5.1 -- or `--channels`;
 silent track generated for clips without audio), then chains `xfade` +
@@ -838,7 +852,7 @@ measurements that combine with each other and with `--beats`/`--highlights`:
 
 ### check.py — pre-delivery compliance
 ```
-check.py INPUT --platform youtube|shorts|reels|tiktok|x|linkedin|facebook|broadcast|podcast|custom [--no-loudness] [--json]
+check.py INPUT --platform youtube|shorts|reels|tiktok|x|linkedin|facebook|broadcast|podcast|custom [--no-loudness] [--content] [--json]
          [--max-duration S] [--aspect 9:16] [--lufs -14] [--tp -1] [--max-mb N]
 ```
 PASS/WARN/FAIL per check with the script that fixes it. Run it as the final
@@ -855,6 +869,14 @@ minimum height, fps, codecs, size, LUFS, true peak, SDR-only) come from the one 
 in `scripts/_platforms.py`, which `export.py` and the `render.py` templates read too -- so the
 loudness a preset normalises to and the loudness this tool checks are the same value by
 construction, not by two lists agreeing.
+The `audio` row FAILs (under a loudness target; WARN without one) on a present-but-silent track (peak <= -50 dBFS, the join/audio
+`--silence-threshold` default): measured from the loudness pass, or with one volumedetect
+pass when `--no-loudness` (or a spec with no loudness target) skips it.
+`--content` (opt-in, one decode pass) adds three rows: `black` (share of the duration that is
+black: WARN > 10%, FAIL >= 95%), `frozen` (longest frozen span: WARN > max(3 s, 30% of the
+duration), FAIL when it covers >= 95%, i.e. the whole video) and `silence` (share below
+-50 dBFS: WARN > 50%, FAIL >= 95%). A render project enables it with `"check": {"platform":
+"reels", "content": true}`.
 
 ### batch.py — same recipe over a folder, cached
 ```
@@ -1124,6 +1146,16 @@ timing and type size only)` and the result carries `text_unchanged: true`. It is
 the honest sentence for a report, made automatic: only the line breaks, the
 timing and the type size ever move, and those do not count as a change. The key
 is burn mode only; `--mode mux` never touches the text and omits it.
+
+**Cues that can be seen (2.2.6).** A burn counts the cues it actually draws:
+`cues_burned` (non-blank, overlapping `[0, duration]`) and `cues_outside`
+(non-blank, wholly after the end or before 0) in the `caption` block, with a
+warning note naming the outside count. When no cue is visible — the only cue
+starts after the video ends, every cue is blank, or an `--ass` file has no
+`Dialogue` lines — the run is refused with `kind: input` (`no cue falls inside
+the video (0–3.0 s); first cue starts at 10.0 s`, `every cue is blank`), dry
+runs included. `waveform.py --srt` passes the refusal on. `graphics.py` and
+`overlay.py` treat whitespace-only `--title`/`--name`/`--text` as missing.
 
 Under `--dry-run`/`--plan` on an input that does not exist yet there is no
 geometry to measure. With `--platform` the destination's own frame is used —
@@ -1400,6 +1432,10 @@ threshold ducks on quieter speech, a shorter release brings the bed back faster.
 Every `--music` / `--effects` / `--replace` file is checked before ffmpeg runs (under
 `--dry-run` too): missing, empty, unreadable or with no audio stream, all of them are named in
 one refusal (`kind: input`, `problems: [{flag, path, reason}]`).
+Each of those files, and under `--duck` the voice, is also measured (whole-file peak, under
+not under `--dry-run`): at or below `--silence-threshold` (default -50 dBFS) it is silent.
+`--on-silent warn` (default) mixes it anyway and reports `silent: [{flag, path, peak_db}]`
+plus a note; `--on-silent fail` adds it to the same refusal with reason `silent (peak X dBFS)`.
 `--stereo-widen 0..1` widens the stereo image (`extrastereo=m=1+2*amount`) and
 needs a real stereo source: it scales the side signal (L−R), so a mono track
 duplicated to two channels has nothing to scale. A 1-channel input is refused

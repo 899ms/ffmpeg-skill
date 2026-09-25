@@ -4,6 +4,12 @@
 
 ## Unreleased
 
+(nothing yet)
+
+## 2.3.0
+
+_Automated release: version and notes generated from pull requests merged since 2.2.5._
+
 - feat(join): `--on-silent warn|fail|skip` (default `warn`) and `--silence-threshold DB` (default -50 dBFS). The preflight measures every input with audio (one volumedetect pass on a real run; `--dry-run` measures nothing and says so) and treats a peak at or below the threshold as silent -- the trace of a TTS step that wrote a valid but empty wav, which the 2.2.0 missing/empty/unreadable checks let through. `warn` joins it and names it under the new `silent: [{index, path, peak_db}]` key and in `notes`; `fail` refuses it in the same `kind: input` document as the other problems (`silent (peak -91.0 dBFS)`); `skip` drops it into `skipped`. Inputs without an audio stream are never silent. The join's own ffmpeg command is unchanged, and render.py forwards nothing new.
 - fix: `audio.py` no longer passes a silent `--music` / `--replace` / `--effects` file, or a silent
   voice under `--duck`, as verified. Each is peak-measured in the 2.2.4 preflight (real runs; a dry run measures nothing);
@@ -21,6 +27,7 @@
 - fix(join): a segment shorter than 2 frames (audio-only: 0.05 s) and a path listed twice no longer join unremarked: new `short_segments: [{index, path, duration}]` and `duplicates: [{path, indices}]` keys (always present, `[]` when none) plus notes. Warnings only; the join command is unchanged.
 - fix(waveform): silent input audio no longer renders a flat-line audiogram without a word. A real run peak-measures the input; `--on-silent warn|fail` (default warn) and `--silence-threshold` (default -50 dBFS) as in `audio.py`; new `silent` key (`null` under `--dry-run`) and a note.
 - fix(asr): a speech engine that ran and found no speech says `<engine> found no speech in <input>` (`kind: input`, `reason: "no_speech"`, `engine`) instead of faster-whisper's "no local speech-to-text engine found" or whisper.cpp / openai-whisper's "no cues found in /tmp/ffskill_asr_*/audio.srt".
+- feat: catch valid-but-empty content (silent TTS, invisible captions, -Infinity JSON) (#294)
 
 ## 2.2.5
 

@@ -4,7 +4,14 @@
 
 ## Unreleased
 
+(nothing yet)
+
+## 2.3.1
+
+_Automated release: version and notes generated from pull requests merged since 2.3.0._
+
 - fix(render): a plan's `check` verify step honours `"content": true` (`check.py --content`), with or without a `platform`, the same key a project's `check` stage takes. Before, `render.py PLAN` ran a check step only when it named a platform and never passed `--content`.
+- fix(render): plan check step honours "content": true (#295)
 
 ## 2.3.0
 
